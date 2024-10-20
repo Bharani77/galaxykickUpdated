@@ -21,7 +21,7 @@ def write_config(data, form_number):
         "interval": int(data[f'IntervalTime{form_number}']),
         "rival": data[f'Rival{form_number}'].split(',')
     }
-    with open(f'config_{form_number}.json', 'w') as f:
+    with open(f'config{form_number}.json', 'w') as f:
         json.dump(config, f)
 
 def start_test_js(form_number):
