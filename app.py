@@ -14,12 +14,12 @@ test_processes = {1: None, 2: None}
 
 def write_config(data, form_number):
     config = {
-        "RC": data['RC'],
-        "AttackTime": int(data['AttackTime']),
-        "DefenceTime": int(data['DefenceTime']),
-        "planetName": data['PlanetName'],
-        "interval": int(data['IntervalTime']),
-        "rival": data['Rival'].split(',')
+        "RC": data[f'RC{form_number}'],
+        "AttackTime": int(data[f'AttackTime{form_number}']),
+        "DefenceTime": int(data[f'DefenceTime{form_number}']),
+        "planetName": data[f'PlanetName{form_number}'],
+        "interval": int(data[f'IntervalTime{form_number}']),
+        "rival": data[f'Rival{form_number}'].split(',')
     }
     with open(f'config_{form_number}.json', 'w') as f:
         json.dump(config, f)
@@ -43,10 +43,11 @@ def start_galaxy(form_number):
         # Start galaxy.js with arguments
         args = ['node', f'galaxy_{form_number}.js']
         for key, value in data.items():
-            if key != 'Rival':
-                args.extend([f'--{key}', str(value)])
+            base_key = key.rstrip('12')  # Remove the form number from the key
+            if base_key != 'Rival':
+                args.extend([f'--{base_key}', str(value)])
             else:
-                args.extend([f'--{key}', value])
+                args.extend([f'--{base_key}', value])
         
         galaxy_processes[form_number] = subprocess.Popen(args)
     
