@@ -29,6 +29,7 @@
     pkgs.ngrok               # Include ngrok package
     pkgs.docker              # Add Docker package
     pkgs.docker-compose
+    pkgs.podman
   ];
   env = {};
   services.docker.enable = true;

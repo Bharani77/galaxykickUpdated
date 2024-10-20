@@ -1,5 +1,5 @@
 # Use the custom base image
-FROM node:18-bullseye
+FROM docker.io/node:18-bullseye
 
 # Set the working directory in the container
 WORKDIR /galaxybackend
