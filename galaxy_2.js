@@ -36,7 +36,7 @@ function loadConfig() {
 
 loadConfig();
 
-fs.watch('config.json', (eventType) => {
+fs.watch('config2.json', (eventType) => {
     if (eventType === 'change') {
         console.log('Config file changed. Reloading...');
         loadConfig();
