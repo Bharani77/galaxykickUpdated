@@ -20,7 +20,7 @@ let config = {
 
 function loadConfig() {
     try {
-        const data = fs.readFileSync('config.json', 'utf8');
+        const data = fs.readFileSync('config2.json', 'utf8');
         Object.assign(config, JSON.parse(data));
         config.DefenceTime1 = config.DefenceTime;
         tempTime1 = config.AttackTime;
