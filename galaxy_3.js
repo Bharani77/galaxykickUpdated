@@ -55,7 +55,7 @@ async function handleError(error) {
 
 function setupWebSocket() {
     try {
-        socket = new WebSocket('ws://localhost:8081');
+        socket = new WebSocket('ws://localhost:8082');
 
         socket.onopen = async function() {
             console.log(isReconnecting ? "Reconnection successful" : "Connected to WebSocket server");
@@ -353,6 +353,7 @@ async function handleAttack(elapsedTime) {
     
     if (searchResult.flag && searchResult.matchedRival) {
         console.log("Rival found, attempting to imprison");
+        actions.sleep(actualSleepTime);
         const imprisonStart = performance.now();
         await imprison();
         const imprisonDuration = performance.now() - imprisonStart;
@@ -383,6 +384,14 @@ async function handleDefense(elapsedTime) {
     
     if (searchResult.flag && searchResult.matchedRival) {
         console.log("Rival found during defense, monitoring...");
+        const imprisonStart = performance.now();
+        await imprison();
+        const imprisonDuration = performance.now() - imprisonStart;
+        console.log(`Imprison action took ${imprisonDuration.toFixed(2)}ms`);
+        
+        // Adjust AttackTime based on actual durations
+        config.AttackTime += actualSleepTime + searchDuration + imprisonDuration;
+        actions.sleep(actualSleepTime);
         flag = 0;
     } else {
         console.log("No rival found during defense");
@@ -409,6 +418,7 @@ async function handleReset(elapsedTime) {
     
     if (searchResult.flag && searchResult.matchedRival) {
         console.log("Rival found after reset, attempting to imprison");
+        actions.sleep(actualSleepTime);
         const imprisonStart = performance.now();
         await imprison();
         const imprisonDuration = performance.now() - imprisonStart;
