@@ -353,7 +353,7 @@ async function handleAttack(elapsedTime) {
     
     if (searchResult.flag && searchResult.matchedRival) {
         console.log("Rival found, attempting to imprison");
-        actions.sleep(adjustedAttackTime);
+        await actions.sleep(adjustedAttackTime);
         const imprisonStart = performance.now();
         await imprison();
         const imprisonDuration = performance.now() - imprisonStart;
@@ -384,7 +384,7 @@ async function handleDefense(elapsedTime) {
     
     if (searchResult.flag && searchResult.matchedRival) {
         console.log("Rival found during defense, monitoring...");
-        actions.sleep(adjustedDefenseTime);
+        await actions.sleep(adjustedDefenseTime);
         const imprisonStart = performance.now();
         await imprison();
         const imprisonDuration = performance.now() - imprisonStart;
@@ -419,7 +419,7 @@ async function handleReset(elapsedTime) {
     
     if (searchResult.flag && searchResult.matchedRival) {
         console.log("Rival found after reset, attempting to imprison");
-        actions.sleep(adjustedResetTime);
+        await actions.sleep(adjustedResetTime);
         const imprisonStart = performance.now();
         await imprison();
         const imprisonDuration = performance.now() - imprisonStart;
