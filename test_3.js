@@ -299,7 +299,7 @@ const actions = {
         matchedRival: result.rival || null,
         matchedText: result.matchedText || null
     };
-}
+},
   async scroll({ selector }) {
     await page.waitForSelector(selector, { timeout: TIMEOUT });
     await page.evaluate((sel, pos) => {
