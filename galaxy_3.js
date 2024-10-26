@@ -519,11 +519,12 @@ async function mainLoop() {
                 console.log(`New loop iteration started at: ${new Date().toISOString()}`);
                 await actions.sleep(50);
                 await executeRivalChecks(config.planetName);
-                await actions.sleep(100);
+                await actions.sleep(300);
 
                 let searchResult = await actions.searchAndClick(config.rival);
                 let found = searchResult.matchedRival;
-                
+                console.log("Matched Rival flag",found);
+				console.log("Matched Rival flag",searchResult.flag);
                 if (searchResult.flag && found) {
                     let rivalFoundTime = performance.now();
                     let elapsedTime = rivalFoundTime - loopStartTime;
@@ -565,22 +566,23 @@ async function executeAttackSequence(elapsedTime, predictedTiming) {
     }
     
     // Execute the kick
-    const rivalCheckStart = performance.now();
-    await executeRivalChecks(config.planetName);
+    //const rivalCheckStart = performance.now();
+    //await executeRivalChecks(config.planetName);
     
-    const searchResult = await actions.searchAndClick(config.rival);
-    const success = searchResult.flag && searchResult.matchedRival;
+    //const searchResult = await actions.searchAndClick(config.rival);
+    //const success = searchResult.flag && searchResult.matchedRival;
+	//console.log("Success flag result",success);
     
     // Record the result
-    const executionTime = performance.now() - startTime;
-    mlModel.recordResult(predictedTiming, success, executionTime);
+    //const executionTime = performance.now() - startTime;
+    //mlModel.recordResult(predictedTiming, success, executionTime);
     
-    if (success) {
+    //if (success) {
         await imprison();
         console.log(`Successful kick with timing ${predictedTiming}ms`);
-    } else {
-        console.log(`Failed kick with timing ${predictedTiming}ms`);
-    }
+    //} else {
+    //    console.log(`Failed kick with timing ${predictedTiming}ms`);
+    //}
 }
 async function initialConnection() {
     try {
