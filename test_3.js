@@ -255,51 +255,39 @@ const actions = {
     }
   },
 
-  async searchAndClick({ rivals }) {
-    // Ensure rivals is always an array
-    const rivalsArray = Array.isArray(rivals) ? rivals : [rivals];
+
+async searchAndClick({ rivals }) {
+    if (!Array.isArray(rivals)) {
+      throw new Error('rivals must be an array');
+    }
 
     let result = await Promise.race([
-        page.evaluate((selector, rivalsList) => {
-            const elements = document.querySelectorAll(selector);
-            for (const element of elements) {
-                const elementText = element.textContent.trim();
-                // Exact match check including special characters
-                const matchedRival = rivalsList.find(rival => {
-                    const normalizedRival = rival.trim();
-                    return elementText === normalizedRival;
-                });
-                
-                if (matchedRival) {
-                    // Only click if we have an exact match
-                    element.click();
-                    return { 
-                        found: true, 
-                        rival: matchedRival,
-                        matchedText: elementText 
-                    };
-                }
-            }
-            return { found: false };
-        }, 'li', rivalsArray),
-        sleep(TIMEOUT).then(() => ({ found: false }))
+      page.evaluate((selector, rivalsArray) => {
+        const elements = document.querySelectorAll(selector);
+        for (const element of elements) {
+          const matchedRival = rivalsArray.find(rival => element.textContent.trim() === rival.trim());
+          if (matchedRival) {
+            element.click();
+            return { found: true, rival: matchedRival };
+          }
+        }
+        return { found: false };
+      }, 'li', rivals),
+      sleep(TIMEOUT).then(() => ({ found: false }))
     ]);
 
     if (!result.found) {
-        await page.click('.dialog__close-button > img');
+      await page.click('.dialog__close-button > img');
     }
 
     return {
-        status: 'success',
-        action: 'searchAndClick',
-        message: result.found ? 
-            `Found and clicked exact matching element: "${result.matchedText}" for rival: "${result.rival}"` : 
-            'No exact match found, clicked alternative button',
-        flag: result.found,
-        matchedRival: result.rival || null,
-        matchedText: result.matchedText || null
+      status: 'success',
+      action: 'searchAndClick',
+      message: result.found ? `Found and clicked exact matching element for rival: ${result.rival}` : 'No exact match found, clicked alternative button',
+      flag: result.found,
+      matchedRival: result.rival || "dummyvalue"
     };
-},
+  },
   async scroll({ selector }) {
     await page.waitForSelector(selector, { timeout: TIMEOUT });
     await page.evaluate((sel, pos) => {
