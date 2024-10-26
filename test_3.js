@@ -263,10 +263,21 @@ const actions = {
         page.evaluate((selector, rivalsList) => {
             const elements = document.querySelectorAll(selector);
             for (const element of elements) {
-                const matchedRival = rivalsList.find(rival => element.textContent.trim() === rival.trim());
+                const elementText = element.textContent.trim();
+                // Exact match check including special characters
+                const matchedRival = rivalsList.find(rival => {
+                    const normalizedRival = rival.trim();
+                    return elementText === normalizedRival;
+                });
+                
                 if (matchedRival) {
+                    // Only click if we have an exact match
                     element.click();
-                    return { found: true, rival: matchedRival };
+                    return { 
+                        found: true, 
+                        rival: matchedRival,
+                        matchedText: elementText 
+                    };
                 }
             }
             return { found: false };
@@ -281,12 +292,14 @@ const actions = {
     return {
         status: 'success',
         action: 'searchAndClick',
-        message: result.found ? `Found and clicked exact matching element for rival: ${result.rival}` : 'No exact match found, clicked alternative button',
+        message: result.found ? 
+            `Found and clicked exact matching element: "${result.matchedText}" for rival: "${result.rival}"` : 
+            'No exact match found, clicked alternative button',
         flag: result.found,
-        matchedRival: result.rival || "dummyvalue"
+        matchedRival: result.rival || null,
+        matchedText: result.matchedText || null
     };
-  },
-
+}
   async scroll({ selector }) {
     await page.waitForSelector(selector, { timeout: TIMEOUT });
     await page.evaluate((sel, pos) => {
