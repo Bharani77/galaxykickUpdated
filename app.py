@@ -9,8 +9,8 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-galaxy_processes = {1: None, 2: None, 3: None}
-test_processes = {1: None, 2: None, 3: None}
+galaxy_processes = {1: None, 2: None, 3: None, 4: None, 5: None}
+test_processes = {1: None, 2: None, 3: None, 4: None, 5: None}
 
 def write_config(data, form_number):
     config = {
@@ -77,7 +77,7 @@ def stop_galaxy(form_number):
         return jsonify({"message": f"Error executing killNode_{form_number}.sh: {str(e)}"}), 500
 
 def cleanup():
-    for form_number in [1, 2, 3]:
+    for form_number in [1, 2, 3, 4, 5]:
         if galaxy_processes[form_number]:
             galaxy_processes[form_number].terminate()
         if test_processes[form_number]:
@@ -90,7 +90,7 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, lambda s, f: cleanup())
     
     # Start test.js for both forms when the Flask app starts
-    for form_number in [1, 2, 3]:
+    for form_number in [1, 2, 3, 4, 5]:
         start_test_js(form_number)
     
     app.run(host='0.0.0.0', port=5000)

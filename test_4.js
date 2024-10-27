@@ -1,7 +1,7 @@
 const WebSocket = require('ws');
 const puppeteer = require('puppeteer');
 
-const PORT = 8080;
+const PORT = 8083;
 const TIMEOUT = 3000;
 const SCROLL_POSITION = 288452.8229064941406;
 

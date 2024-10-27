@@ -2,11 +2,222 @@ const WebSocket = require('ws');
 const fs = require('fs');
 const { exec } = require('child_process');
 
+// Add these utility functions near the top of the file
+const performance = require('perf_hooks').performance;
+
+function formatTiming(ms) {
+    return `${ms.toFixed(2)}ms`;
+}
+
 let socket;
 let isReconnecting = false;
 let flag = 0;
 let count = 0;
 let tempTime1 = 0;
+
+// ML Model state
+class EnhancedMLTimingModel {
+    constructor() {
+        this.successfulTimings = [];
+        this.failedTimings = [];
+        this.maxHistorySize = 100;
+        this.binSize = 5; // 5ms granularity for more precise timing
+        this.successRatesByTiming = new Map();
+        this.recentResults = []; // Store recent results for adaptive learning
+        this.maxRecentSize = 20;
+        
+        // Parameters for weighted moving average
+        this.alpha = 0.3; // Weight for new observations
+        this.currentEstimate = null;
+        
+        this.loadModel();
+    }
+
+    loadModel() {
+        try {
+            if (fs.existsSync('ml_model_state.json')) {
+                const data = JSON.parse(fs.readFileSync('ml_model_state.json', 'utf8'));
+                this.successfulTimings = data.successfulTimings || [];
+                this.failedTimings = data.failedTimings || [];
+                this.successRatesByTiming = new Map(Object.entries(data.successRatesByTiming || {}));
+                this.recentResults = data.recentResults || [];
+                this.currentEstimate = data.currentEstimate;
+            }
+        } catch (error) {
+            console.error('Error loading ML model:', error);
+        }
+    }
+
+    saveModel() {
+        try {
+            const data = {
+                successfulTimings: this.successfulTimings,
+                failedTimings: this.failedTimings,
+                successRatesByTiming: Object.fromEntries(this.successRatesByTiming),
+                recentResults: this.recentResults,
+                currentEstimate: this.currentEstimate
+            };
+            fs.writeFileSync('ml_model_state.json', JSON.stringify(data));
+        } catch (error) {
+            console.error('Error saving ML model:', error);
+        }
+    }
+	
+	getEstimatedLatency() {
+        // Calculate average latency from recent successful results
+        const recentSuccesses = this.recentResults
+            .filter(result => result.success)
+            .map(result => result.executionTime);
+        
+        if (recentSuccesses.length === 0) return 0;
+        
+        return recentSuccesses.reduce((sum, time) => sum + time, 0) / recentSuccesses.length;
+    }
+
+    getBinnedTiming(timing) {
+        return Math.round(timing / this.binSize) * this.binSize;
+    }
+
+    updateSuccessRate(timing, success) {
+        const binnedTiming = this.getBinnedTiming(timing);
+        const current = this.successRatesByTiming.get(binnedTiming) || { successes: 0, attempts: 0 };
+        current.attempts++;
+        if (success) current.successes++;
+        this.successRatesByTiming.set(binnedTiming, current);
+    }
+
+    findBestTimingInRange(attackTime, defenseTime) {
+        const validTimings = [];
+        
+        // Create ranges of timings to test
+        for (let timing = attackTime; timing <= defenseTime; timing += this.binSize) {
+            const binnedTiming = this.getBinnedTiming(timing);
+            const stats = this.successRatesByTiming.get(binnedTiming) || { successes: 0, attempts: 0 };
+            
+            if (stats.attempts > 0) {
+                const successRate = stats.successes / stats.attempts;
+                const confidence = 1 - (1 / Math.sqrt(stats.attempts + 1));
+                const score = successRate * confidence;
+                
+                validTimings.push({
+                    timing: binnedTiming,
+                    score,
+                    successRate,
+                    attempts: stats.attempts
+                });
+            }
+        }
+
+        // Sort by score and get the best timing
+        validTimings.sort((a, b) => b.score - a.score);
+        return validTimings[0]?.timing;
+    }
+
+    getAdaptiveTiming(attackTime, defenseTime) {
+        const range = defenseTime - attackTime;
+        const midPoint = attackTime + (range / 2);
+        
+        // If we have recent successful results, use them to adjust the timing
+        if (this.recentResults.length > 0) {
+            const recentSuccesses = this.recentResults
+                .filter(result => result.success)
+                .map(result => result.timing);
+            
+            if (recentSuccesses.length > 0) {
+                // Calculate weighted average of recent successful timings
+                const weights = recentSuccesses.map((_, i) => 
+                    Math.exp(-i / recentSuccesses.length));
+                const totalWeight = weights.reduce((a, b) => a + b, 0);
+                
+                const weightedSum = recentSuccesses.reduce((sum, timing, i) => 
+                    sum + (timing * weights[i]), 0);
+                
+                return weightedSum / totalWeight;
+            }
+        }
+        
+        // If no recent successes, start from the middle and gradually explore
+        return midPoint;
+    }
+
+    predictTiming(attackTime, defenseTime) {
+        console.log(`Predicting timing between ${attackTime}ms and ${defenseTime}ms`);
+        
+        // First, check if we have a good timing from historical data
+        const bestHistoricalTiming = this.findBestTimingInRange(attackTime, defenseTime);
+        
+        // Get adaptive timing based on recent results
+        const adaptiveTiming = this.getAdaptiveTiming(attackTime, defenseTime);
+        
+        // If we have a good historical timing, use it most of the time
+        if (bestHistoricalTiming && Math.random() < 0.7) {
+            console.log(`Using historical best timing: ${bestHistoricalTiming}ms`);
+            return bestHistoricalTiming;
+        }
+        
+        // Use adaptive timing with small random adjustment
+        const range = defenseTime - attackTime;
+        const randomAdjustment = (Math.random() - 0.5) * (range * 0.1); // ±5% of range
+        const finalTiming = Math.min(defenseTime, 
+                                   Math.max(attackTime, 
+                                          adaptiveTiming + randomAdjustment));
+        
+        console.log(`Using adaptive timing: ${finalTiming}ms`);
+        return finalTiming;
+    }
+
+    recordResult(timing, success, executionTime) {
+        const binnedTiming = this.getBinnedTiming(timing);
+        
+        // Update success rates
+        this.updateSuccessRate(binnedTiming, success);
+        
+        // Update timing history
+        if (success) {
+            this.successfulTimings.push(binnedTiming);
+            if (this.successfulTimings.length > this.maxHistorySize) {
+                this.successfulTimings.shift();
+            }
+        } else {
+            this.failedTimings.push(binnedTiming);
+            if (this.failedTimings.length > this.maxHistorySize) {
+                this.failedTimings.shift();
+            }
+        }
+
+        // Update recent results
+        this.recentResults.push({ timing: binnedTiming, success, executionTime });
+        if (this.recentResults.length > this.maxRecentSize) {
+            this.recentResults.shift();
+        }
+
+        // Update weighted moving average estimate
+        if (success) {
+            if (this.currentEstimate === null) {
+                this.currentEstimate = timing;
+            } else {
+                this.currentEstimate = (this.alpha * timing) + 
+                                     ((1 - this.alpha) * this.currentEstimate);
+            }
+        }
+
+        this.saveModel();
+        
+        // Log success rate for this timing
+        const stats = this.successRatesByTiming.get(binnedTiming);
+        const successRate = stats ? (stats.successes / stats.attempts * 100).toFixed(1) : 0;
+        console.log(`Timing ${binnedTiming}ms - Success Rate: ${successRate}%`);
+    }
+
+    getSuccessRate() {
+        const totalAttempts = this.successfulTimings.length + this.failedTimings.length;
+        return totalAttempts > 0 ? this.successfulTimings.length / totalAttempts : 0;
+    }
+}
+
+
+const mlModel = new EnhancedMLTimingModel();
+
 
 let config = {
     RC: '',
@@ -160,7 +371,6 @@ const actions = {
         isReconnecting = true;
         try {
             await sendMessage({ action: 'reloadPage' });
-            await waitForAllElements();
             console.log("Page reloaded and WebSocket reconnected");
         } catch (error) {
             console.error("Error during page reload:", error);
@@ -262,7 +472,7 @@ async function imprison() {
                 { type: 'click', selector: '.dialog__close-button > img' },
                 { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
             ]},
-            { action: 'sleep', ms: 250 },
+            { action: 'sleep', ms: 450 },
             { action: 'click', selector: '.start__user__nick' }
         ];
 
@@ -271,7 +481,7 @@ async function imprison() {
         }
 
         console.log("Imprison actions completed successfully");
-        await actions.sleep(50);
+        await actions.sleep(100);
     } catch (error) {
         console.error("Error in imprison:", error);
         throw error;
@@ -292,108 +502,88 @@ async function waitForElement(selector, maxAttempts = 5, interval = 50) {
 }
 
 async function mainLoop() {
-    while (true) {
-        try {
-            await actions.waitForClickable('.planet__events');
-            let loopStartTime = Date.now();
-            await actions.sleep(50);
+        while (true) {
+            try {
+                const loopStartTime = performance.now();
+                await actions.waitForClickable('.planet__events');
+                await actions.sleep(50);
 
-            const isInPrison = await checkIfInPrison(config.planetName);
-            if (isInPrison) {
-                console.log("In prison. Executing auto-release...");
-                await autoRelease();
-                await actions.waitForClickable('.planet-bar__button__action > img');
-                loopStartTime = Date.now();
-                continue;
-            }
-
-            console.log(`New loop iteration started at: ${loopStartTime}`);
-            await actions.sleep(50);
-            await executeRivalChecks(config.planetName);
-            await actions.sleep(100);
-
-            let searchResult = await actions.searchAndClick(config.rival);
-            let found = searchResult.matchedRival;
-            
-            if (searchResult.flag && found) {
-                let rivalFoundTime = Date.now();
-                let elapsedTime = rivalFoundTime - loopStartTime;
-                console.log(`Time elapsed since loop start: ${elapsedTime}ms`);
-
-                if (config.AttackTime < config.DefenceTime && flag !== 1) {
-                    await handleAttack(elapsedTime);
-                } else if (config.AttackTime < config.DefenceTime1 && flag === 1) {
-                    await handleDefense(elapsedTime);
-                } else {
-                    await handleReset(elapsedTime);
+                const isInPrison = await checkIfInPrison(config.planetName);
+                if (isInPrison) {
+                    console.log("In prison. Executing auto-release...");
+                    await autoRelease();
+                    await actions.waitForClickable('.planet-bar__button__action > img');
+                    continue;
                 }
-            } else {
-                console.log("No rival found");
-                flag = 1;
-                count = 0;
-                found = false;
-            }
 
-            console.log("Loop iteration complete. AttackTime:", config.AttackTime);
-        } catch (error) {
-            await handleError(error);
+                console.log(`New loop iteration started at: ${new Date().toISOString()}`);
+                await actions.sleep(50);
+                await executeRivalChecks(config.planetName);
+                await actions.sleep(300);
+
+                let searchResult = await actions.searchAndClick(config.rival);
+                let found = searchResult.matchedRival;
+                console.log("Matched Rival flag",found);
+				console.log("Matched Rival flag",searchResult.flag);
+                if (searchResult.flag && found) {
+                    let rivalFoundTime = performance.now();
+                    let elapsedTime = rivalFoundTime - loopStartTime;
+                    console.log(`Time elapsed since loop start: ${elapsedTime}ms`);
+                    
+                    // Get prediction from enhanced ML model
+                    const predictedTiming = mlModel.predictTiming(
+                        config.AttackTime,
+                        config.DefenceTime,
+                        config.interval
+                    );
+                    
+                    // Log enhanced timing information
+                    console.log(`ML predicted timing: ${predictedTiming}ms`);
+                    console.log(`Estimated system latency: ${mlModel.getEstimatedLatency()}ms`);
+                    console.log(`Recent success rate: ${(mlModel.getSuccessRate() * 100).toFixed(2)}%`);
+                    
+                    // Execute attack with timing measurements
+                    await executeAttackSequence(elapsedTime, predictedTiming);
+                } else {
+                    // Record failed attempt with actual execution time
+                    const executionTime = performance.now() - loopStartTime;
+                    mlModel.recordResult(config.AttackTime, false, executionTime);
+                }
+            } catch (error) {
+                await handleError(error);
+            }
         }
     }
-}
 
-async function handleAttack(elapsedTime) {
-    config.AttackTime = tempTime1 + count;
-    count += config.interval;
-    config.AttackTime -= 75;
-    console.log("count: " + count);
-    console.log("Current Attack Time: " + config.AttackTime);
-    
-    await executeAttackSequence(elapsedTime);
-}
 
-async function handleDefense(elapsedTime) {
-    config.AttackTime = tempTime1 - count;
-    count += config.interval;
-    config.AttackTime -= 75;
+async function executeAttackSequence(elapsedTime, predictedTiming) {
+    const startTime = performance.now();
     
-    await executeAttackSequence(elapsedTime);
-}
-
-async function handleReset(elapsedTime) {
-    console.log("Reset condition triggered");
-    config.AttackTime = tempTime1;
-    count = 0;
-    flag = 0;
-    
-    await executeAttackSequence(elapsedTime);
-}
-
-async function executeAttackSequence(elapsedTime) {
-    let adjustedAttackTime = Math.max(0, config.AttackTime - elapsedTime);
-    console.log(`Adjusted AttackTime: ${adjustedAttackTime}ms`);
-    
-    if (adjustedAttackTime > 0) {
-        await actions.sleep(adjustedAttackTime);
+    // Wait for the predicted timing
+    if (predictedTiming > 0) {
+        console.log(`Pausing for ${predictedTiming}ms`);
+        await actions.sleep(predictedTiming);
     }
     
-    await executeRivalChecks(config.planetName);
-    const rivalsToSearch = Array.isArray(config.rival) ? config.rival : [config.rival];
-    let searchResult = await actions.searchAndClick(rivalsToSearch);
-    let found = searchResult.matchedRival;
-    if (searchResult.flag && found) {
-        console.log("Rival still present");
-        await actions.sleep(75);
+    // Execute the kick
+    //const rivalCheckStart = performance.now();
+    //await executeRivalChecks(config.planetName);
+    
+    //const searchResult = await actions.searchAndClick(config.rival);
+    //const success = searchResult.flag && searchResult.matchedRival;
+	//console.log("Success flag result",success);
+    
+    // Record the result
+    //const executionTime = performance.now() - startTime;
+    //mlModel.recordResult(predictedTiming, success, executionTime);
+    
+    //if (success) {
         await imprison();
-        config.AttackTime += 75;
-        flag = 0;
-        found = false;
-    } else {
-        console.log("No rival found");
-        flag = 1;
-        count = 0;
-    }
+        console.log(`Successful kick with timing ${predictedTiming}ms`);
+    //} else {
+    //    console.log(`Failed kick with timing ${predictedTiming}ms`);
+    //}
 }
-
 async function initialConnection() {
     try {
         await actions.sleep(4000);

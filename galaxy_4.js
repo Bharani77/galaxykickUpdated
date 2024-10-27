@@ -231,7 +231,7 @@ let config = {
 
 function loadConfig() {
     try {
-        const data = fs.readFileSync('config2.json', 'utf8');
+        const data = fs.readFileSync('config4.json', 'utf8');
         Object.assign(config, JSON.parse(data));
         config.DefenceTime1 = config.DefenceTime;
         tempTime1 = config.AttackTime;
@@ -247,7 +247,7 @@ function loadConfig() {
 
 loadConfig();
 
-fs.watch('config2.json', (eventType) => {
+fs.watch('config4.json', (eventType) => {
     if (eventType === 'change') {
         console.log('Config file changed. Reloading...');
         loadConfig();
@@ -265,7 +265,7 @@ async function handleError(error) {
 
 function setupWebSocket() {
     try {
-        socket = new WebSocket('ws://localhost:8081');
+        socket = new WebSocket('ws://localhost:8083');
 
         socket.onopen = async function() {
             console.log(isReconnecting ? "Reconnection successful" : "Connected to WebSocket server");
