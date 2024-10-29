@@ -349,6 +349,7 @@ const actions = {
         }
     },
     click: (selector) => sendMessage({ action: 'click', selector }),
+	runAiChat: (user) => sendMessage({ action: 'runAiChat', user }),
     xpath: (xpath) => sendMessage({ action: 'xpath', xpath }),
     enterRecoveryCode: (code) => sendMessage({ action: 'enterRecoveryCode', code }),
     sleep: (ms) => sendMessage({ action: 'sleep', ms }),
@@ -595,6 +596,7 @@ async function initialConnection() {
         console.log("Recovery code entered");
         await actions.click('.mdc-dialog__button:nth-child(2)');
         console.log("Second button clicked");
+		await actions.runAiChat("]--BEAST--["); //change this
         await mainLoop();
     } catch (error) {
         await handleError(error);
