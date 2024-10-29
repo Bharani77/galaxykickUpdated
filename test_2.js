@@ -1,10 +1,11 @@
 const WebSocket = require('ws');
 const puppeteer = require('puppeteer');
+const axios = require('axios');
 
 const PORT = 8081;
 const TIMEOUT = 3000;
 const SCROLL_POSITION = 288452.8229064941406;
-
+const processedQueries = new Set();
 const wss = new WebSocket.Server({ port: PORT });
 
 let browser;
@@ -95,6 +96,32 @@ async function navigateToGalaxy() {
   console.log('Navigated to galaxy.mobstudio.ru');
 }
 
+async function getMistralResponse(userQuery) {
+  const apiKey = "WBCXKwMNUV4aogBXd5nNJbERC718YiNi"; // Ensure your API key is set in environment variables
+  const apiUrl = 'https://api.mistral.ai/v1/chat/completions'; // Replace with the correct API endpoint if necessary
+
+  try {
+    // Prompt for concise response with a limit on length
+    const prompt = `Provide a concise response (no more than 2-3 lines) to: "${userQuery}"`;
+
+    const response = await axios.post(apiUrl, {
+      model: 'mistral-large-latest', // Adjust the model as necessary
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 20, // Adjust max_tokens to limit the response length
+    }, {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    return response.data.choices[0].message.content; // Extract the response content
+  } catch (error) {
+    console.error('Error fetching response from Mistral:', error);
+    return 'Sorry, I could not process your request.';
+  }
+}
+
 async function injectCSS() {
   const cssContent = await page.evaluate(() => {
     return Array.from(document.styleSheets)
@@ -121,6 +148,63 @@ setupBrowser();
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const actions = {
+	
+  async runAiChat({ username }) {
+
+  // Wait for the chat message content to be available
+  await page.waitForSelector('.channel-message__content__text');
+
+  // Function to send a message in the input field
+  async function sendMessage(response) {
+    const inputSelector = '#channel-new-message__text-field-input';
+    await page.waitForSelector(inputSelector);
+    await page.type(inputSelector, response);
+    await page.keyboard.press('Enter');
+  }
+
+  // Set an interval to keep checking for new messages
+  const checkNewMessages = async () => {
+    try {
+      // Evaluate the current state of the chat feed
+      const messages = await page.evaluate(() => {
+        const messageElements = document.querySelectorAll('.channel-message__content__text div');
+        return Array.from(messageElements).map(el => el.textContent.trim()).filter(text => text.length > 0);
+      });
+
+      if (messages.length > 0) {
+        const latestMessage = messages[messages.length - 1]; // Get the latest message
+        console.log('Latest message:', latestMessage);
+
+        // Check if the message starts with /]--BEAST--[
+        if (latestMessage.startsWith(']--BEAST--[')) {
+          const userQuery = latestMessage.replace(']--BEAST--[', '').trim(); // Extract the user query
+
+          // Check if the query has already been processed
+          if (!processedQueries.has(userQuery)) {
+            console.log('New user query:', userQuery);
+
+            // Mark the query as processed
+            processedQueries.add(userQuery);
+
+            // Get the response from Mistral API
+            const botResponse = await getMistralResponse(userQuery);
+            console.log('Bot response:', botResponse);
+
+            // Send the bot response to the chat
+            await sendMessage(botResponse);
+          } else {
+            console.log('Query has already been processed:', userQuery);
+          }
+        }
+      }
+    } catch (error) {
+      console.log('Error fetching messages:');
+    }
+  };
+  // Set an interval to check for new messages every 2 seconds
+  const messageCheckInterval = setInterval(checkNewMessages, 4000);
+  return { status: 'success', action: 'runAiChat', message: "Successfully started AiChat" };
+},
 
   async switchToFrame({ frameIndex, selectorType, selector }) {
     const frames = await page.frames();
