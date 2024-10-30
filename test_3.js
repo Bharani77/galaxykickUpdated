@@ -177,7 +177,7 @@ const actions = {
 
         // Check if the message starts with /]--BEAST--[
         if (latestMessage.startsWith(']--BEAST--[')) {
-          const userQuery = latestMessage.replace(']--BEAST--[', '').trim(); // Extract the user query
+          const userQuery = latestMessage.replace('`[R]OLE[X]`', '').trim(); // Extract the user query
 
           // Check if the query has already been processed
           if (!processedQueries.has(userQuery)) {
