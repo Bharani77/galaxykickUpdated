@@ -47,7 +47,7 @@ COPY package*.json ./
 COPY . .
 
 # Install Puppeteer and its dependencies
-RUN npm install puppeteer && \
+RUN npm install puppeteer axios && \
     npx puppeteer install && \
     npx puppeteer browsers install chrome
 
