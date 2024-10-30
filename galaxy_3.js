@@ -596,7 +596,7 @@ async function initialConnection() {
         console.log("Recovery code entered");
         await actions.click('.mdc-dialog__button:nth-child(2)');
         console.log("Second button clicked");
-		await actions.runAiChat("]--BEAST--[");
+		await actions.runAiChat("`[R]OLE[X]`");
         await mainLoop();
     } catch (error) {
         await handleError(error);
