@@ -475,7 +475,7 @@ async function imprison() {
             ]},
             { action: 'sleep', ms: 250 },
             { action: 'click', selector: '.start__user__nick' }
-		{ action: 'reloadPage' }
+		//{ action: 'reloadPage' }
         ];
 
         for (const action of actionss) {
