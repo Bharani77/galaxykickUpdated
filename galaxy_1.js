@@ -473,9 +473,9 @@ async function imprison() {
                 { type: 'click', selector: '.dialog__close-button > img' },
                 { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
             ]},
-            //{ action: 'sleep', ms: 450 },
-            //{ action: 'click', selector: '.start__user__nick' }
-		{ action: 'reloadPage' }
+            { action: 'sleep', ms: 250 },
+            { action: 'click', selector: '.start__user__nick' }
+		//{ action: 'reloadPage' }
         ];
 
         for (const action of actionss) {
