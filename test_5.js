@@ -476,6 +476,32 @@ async searchAndClick({ rivals }) {
     }
     return { status: 'success', action: 'performSequentialActions', message: 'All actions completed' };
   },
+  async checkUsername({ selector, expectedText }) {
+		try {
+			const matches = await page.evaluate((sel, expected) => {
+				const elements = document.querySelectorAll(sel);
+				// Convert elements to array
+				const elementTexts = Array.from(elements).map(el => el.textContent);
+				
+				// If expectedText is array, check if any rival name matches any element
+				if (Array.isArray(expected)) {
+					return expected.some(name => elementTexts.includes(name));
+				}
+				// If single string, check for exact match
+				return elementTexts.includes(expected);
+				
+			}, selector, expectedText);
+
+			return {
+				status: 'success',
+				action: 'checkUsername',
+				matches: matches,
+				message: matches ? `Found matching rival` : `No matching rival found`
+			};
+		} catch (error) {
+			throw new Error(`Error checking username: ${error.message}`);
+		}
+	},
 
   async enterRecoveryCode({ code }) {
     await page.waitForSelector('input[name="recoveryCode"]', { timeout: 10000 });
