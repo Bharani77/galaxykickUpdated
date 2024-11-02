@@ -379,6 +379,22 @@ const actions = {
             isReconnecting = false;
         }
     },
+    checkUsername: async (rivals) => {
+		try {
+			// Convert single rival to array if needed
+			const rivalsArray = Array.isArray(rivals) ? rivals : [rivals];
+			const quotedRivals = rivalsArray.map(r => `${r.trim()}`);
+			const result = await sendMessage({ 
+				action: 'checkUsername', 
+				selector: '.planet-bar__item-name__name',
+				expectedText: quotedRivals // Send array of trimmed rival names
+			});
+			return result.matches || false;
+		} catch (error) {
+			console.error('Error in checkUsername:', error);
+			return false;
+		}
+    },
     searchAndClick: async (rivals) => {
         if (!Array.isArray(rivals)) throw new Error('rivals must be an array');
         try {
@@ -463,32 +479,72 @@ async function executeRivalChecks(planetName) {
 
 async function imprison() {
     try {
-        const actionss = [
+        // Initial click sequence to open the events panel
+        const initialActions = [
             { action: 'click', selector: ".planet__events" },
             { action: 'click', selector: ".planet__events" },
             { action: 'click', selector: ".planet__events" },
-            { action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
-            { action: 'performSequentialActions', actions: [
-                { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" },
-                { type: 'click', selector: '.dialog__close-button > img' },
-                { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-            ]},
-            { action: 'sleep', ms: 250 },
-            { action: 'click', selector: '.start__user__nick' }
-		//{ action: 'reloadPage' }
         ];
-
-        for (const action of actionss) {
+        
+        for (const action of initialActions) {
             await sendMessage(action);
         }
 
-        console.log("Imprison actions completed successfully");
-        await actions.sleep(100);
+        // First verification: Check if rival is present in the planet
+        let rivalCheckResult1 = await actions.checkUsername(config.rival);
+
+        if (rivalCheckResult1) {
+            console.log("Rival verified successfully, proceeding with imprisonment");
+            
+            // Proceed with imprisonment sequence
+            const imprisonSequence = [
+				{ action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
+                { action: 'performSequentialActions', actions: [
+                    { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" },
+                    { type: 'click', selector: '.dialog__close-button > img' },
+                    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
+                ]},
+                { action: 'sleep', ms: 375 },
+                { action: 'click', selector: '.start__user__nick' }
+            ];
+
+            for (const action of imprisonSequence) {
+                await sendMessage(action);
+            }
+            
+            console.log("Imprison actions completed successfully");
+            await actions.sleep(100);
+        } else {
+            console.log("Rival verification failed, safely exiting");
+            
+            // Safe exit sequence
+            const exitSequence = [
+                { action: 'performSequentialActions', actions: [
+                    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
+                ]},
+                { action: 'sleep', ms: 350 },
+                { action: 'click', selector: '.start__user__nick' }
+            ];
+
+            for (const action of exitSequence) {
+                await sendMessage(action);
+            }
+        }
     } catch (error) {
         console.error("Error in imprison:", error);
+        // Ensure safe exit even in case of error
+        try {
+            await sendMessage({ 
+                action: 'performSequentialActions', 
+                actions: [{ type: 'xpath', xpath: "//a[contains(.,'Exit')]" }]
+            });
+            await actions.sleep(350);
+            await actions.click('.start__user__nick');
+        } catch (exitError) {
+            console.error("Error during safe exit:", exitError);
+        }
         throw error;
     }
-}
 
 async function waitForElement(selector, maxAttempts = 5, interval = 50) {
     for (let i = 0; i < maxAttempts; i++) {
