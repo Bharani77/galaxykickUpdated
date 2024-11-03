@@ -529,17 +529,24 @@ async function imprison() {
             for (const action of exitSequence) {
                 await sendMessage(action);
             }
+	    await actions.sleep(100);
         }
     } catch (error) {
         console.error("Error in imprison:", error);
         // Ensure safe exit even in case of error
         try {
-            await sendMessage({ 
-                action: 'performSequentialActions', 
-                actions: [{ type: 'xpath', xpath: "//a[contains(.,'Exit')]" }]
-            });
-            await actions.sleep(350);
-            await actions.click('.start__user__nick');
+	    const exitSequence = [
+                { action: 'performSequentialActions', actions: [
+                    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
+                ]},
+                { action: 'sleep', ms: 350 },
+                { action: 'click', selector: '.start__user__nick' }
+            ];
+
+            for (const action of exitSequence) {
+                await sendMessage(action);
+            }
+	    await actions.sleep(100);
         } catch (exitError) {
             console.error("Error during safe exit:", exitError);
         }
