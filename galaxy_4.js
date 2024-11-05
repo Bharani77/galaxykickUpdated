@@ -504,7 +504,7 @@ async function imprison() {
                     { type: 'click', selector: '.dialog__close-button > img' },
                     { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
                 ]},
-                { action: 'sleep', ms: 375 },
+                { action: 'sleep', ms: 450 },
                 { action: 'click', selector: '.start__user__nick' }
             ];
 
@@ -522,7 +522,7 @@ async function imprison() {
                 { action: 'performSequentialActions', actions: [
                     { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
                 ]},
-                { action: 'sleep', ms: 350 },
+                { action: 'sleep', ms: 450 },
                 { action: 'click', selector: '.start__user__nick' }
             ];
 
@@ -538,7 +538,7 @@ async function imprison() {
                 action: 'performSequentialActions', 
                 actions: [{ type: 'xpath', xpath: "//a[contains(.,'Exit')]" }]
             });
-            await actions.sleep(350);
+            await actions.sleep(450);
             await actions.click('.start__user__nick');
         } catch (exitError) {
             console.error("Error during safe exit:", exitError);
