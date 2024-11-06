@@ -62,8 +62,8 @@ class EnhancedMLTimingModel {
             console.error('Error saving ML model:', error);
         }
     }
-	
-	getEstimatedLatency() {
+
+        getEstimatedLatency() {
         // Calculate average latency from recent successful results
         const recentSuccesses = this.recentResults
             .filter(result => result.success)
@@ -349,7 +349,7 @@ const actions = {
         }
     },
     click: (selector) => sendMessage({ action: 'click', selector }),
-	runAiChat: (user) => sendMessage({ action: 'runAiChat', user }),
+        runAiChat: (user) => sendMessage({ action: 'runAiChat', user }),
     xpath: (xpath) => sendMessage({ action: 'xpath', xpath }),
     enterRecoveryCode: (code) => sendMessage({ action: 'enterRecoveryCode', code }),
     sleep: (ms) => sendMessage({ action: 'sleep', ms }),
@@ -379,35 +379,36 @@ const actions = {
             isReconnecting = false;
         }
     },
-	checkUsername: async (rivals) => {
-		try {
-			// Convert single rival to array if needed
-			const rivalsArray = Array.isArray(rivals) ? rivals : [rivals];
-			const quotedRivals = rivalsArray.map(r => `${r.trim()}`);
-			const result = await sendMessage({ 
-				action: 'checkUsername', 
-				selector: '.planet-bar__item-name__name',
-				expectedText: quotedRivals // Send array of trimmed rival names
-			});
-			return result.matches || false;
-		} catch (error) {
-			console.error('Error in checkUsername:', error);
-			return false;
-		}
-	},
-    searchAndClick: async (rivals) => {
-        if (!Array.isArray(rivals)) throw new Error('rivals must be an array');
-        try {
-            let response = await sendMessage({ action: 'searchAndClick', rivals });
-            if (!response || !('flag' in response) || !('matchedRival' in response)) {
-                throw new Error('Flag or matchedRival not found in response');
-            }
-            return response;
-        } catch (error) {
-            console.error('Error in searchAndClick:', error);
-            throw error;
+        checkUsername: async (rivals) => {
+                try {
+                        // Convert single rival to array if needed
+                        const rivalsArray = Array.isArray(rivals) ? rivals : [rivals];
+                        const quotedRivals = rivalsArray.map(r => `${r.trim()}`);
+                        const result = await sendMessage({ 
+                                action: 'checkUsername', 
+                                selector: '.planet-bar__item-name__name',
+                                expectedText: quotedRivals // Send array of trimmed rival names
+                        });
+                        return result.matches || false;
+                } catch (error) {
+                        console.error('Error in checkUsername:', error);
+                        return false;
+                }
+        },
+    searchAndClick: async ({ selector, rivals }) => {
+    if (!Array.isArray(rivals)) throw new Error('rivals must be an array');
+    try {
+        let response = await sendMessage({ action: 'searchAndClick', selector, rivals });
+        if (!response || !('flag' in response) || !('matchedRival' in response)) {
+            throw new Error('Flag or matchedRival not found in response');
         }
-    },
+        return response;
+    } catch (error) {
+        console.error('Error in searchAndClick:', error);
+        throw error;
+    }
+	},
+
     enhancedSearchAndClick: (position) => sendMessage({ action: 'enhancedSearchAndClick', position }),
     doubleClick: (selector) => sendMessage({ action: 'doubleClick', selector }),
     performSequentialActions: (actions) => sendMessage({ action: 'performSequentialActions', actions })
@@ -498,14 +499,13 @@ async function imprison() {
             
             // Proceed with imprisonment sequence
             const imprisonSequence = [
-				{ action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
+                                { action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
                 { action: 'performSequentialActions', actions: [
                     { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" },
                     { type: 'click', selector: '.dialog__close-button > img' },
                     { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
                 ]},
-                { action: 'sleep', ms: 450 },
-                { action: 'click', selector: '.start__user__nick' }
+                //{ action: 'click', selector: '.start__user__nick' }
             ];
 
             for (const action of imprisonSequence) {
@@ -513,7 +513,7 @@ async function imprison() {
             }
             
             console.log("Imprison actions completed successfully");
-            await actions.sleep(100);
+			await actions.reloadPage();
         } else {
             console.log("Rival verification failed, safely exiting");
             
@@ -522,31 +522,29 @@ async function imprison() {
                 { action: 'performSequentialActions', actions: [
                     { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
                 ]},
-                { action: 'sleep', ms: 450 },
-                { action: 'click', selector: '.start__user__nick' }
+                //{ action: 'click', selector: '.start__user__nick' }
             ];
 
             for (const action of exitSequence) {
                 await sendMessage(action);
             }
-	    await actions.sleep(100);
+			await actions.reloadPage();
         }
     } catch (error) {
         console.error("Error in imprison:", error);
         // Ensure safe exit even in case of error
         try {
-	    const exitSequence = [
+            const exitSequence = [
                 { action: 'performSequentialActions', actions: [
                     { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
                 ]},
-                { action: 'sleep', ms: 450 },
                 { action: 'click', selector: '.start__user__nick' }
             ];
 
             for (const action of exitSequence) {
                 await sendMessage(action);
             }
-	    await actions.sleep(100);
+			await actions.reloadPage();
         } catch (exitError) {
             console.error("Error during safe exit:", exitError);
         }
@@ -572,7 +570,6 @@ async function mainLoop() {
             try {
                 const loopStartTime = performance.now();
                 await actions.waitForClickable('.planet__events');
-                await actions.sleep(50);
 
                 const isInPrison = await checkIfInPrison(config.planetName);
                 if (isInPrison) {
@@ -583,14 +580,12 @@ async function mainLoop() {
                 }
 
                 console.log(`New loop iteration started at: ${new Date().toISOString()}`);
-                await actions.sleep(50);
                 await executeRivalChecks(config.planetName);
-                await actions.sleep(300);
 
-                let searchResult = await actions.searchAndClick(config.rival);
+                let searchResult = await actions.searchAndClick({ selector: 'li', rivals: config.rival });
                 let found = searchResult.matchedRival;
                 console.log("Matched Rival flag",found);
-				console.log("Matched Rival flag",searchResult.flag);
+                                console.log("Matched Rival flag",searchResult.flag);
                 if (searchResult.flag && found) {
                     let rivalFoundTime = performance.now();
                     let elapsedTime = rivalFoundTime - loopStartTime;
@@ -637,7 +632,7 @@ async function executeAttackSequence(elapsedTime, predictedTiming) {
     
     //const searchResult = await actions.searchAndClick(config.rival);
     //const success = searchResult.flag && searchResult.matchedRival;
-	//console.log("Success flag result",success);
+        //console.log("Success flag result",success);
     
     // Record the result
     //const executionTime = performance.now() - startTime;
@@ -652,7 +647,6 @@ async function executeAttackSequence(elapsedTime, predictedTiming) {
 }
 async function initialConnection() {
     try {
-        await actions.sleep(4000);
         await actions.waitForClickable('.mdc-button--black-secondary > .mdc-button__label');
         //await actions.xpath("//a[2]/div");
         await actions.click('.mdc-button--black-secondary > .mdc-button__label');
@@ -661,7 +655,7 @@ async function initialConnection() {
         console.log("Recovery code entered");
         await actions.click('.mdc-dialog__button:nth-child(2)');
         console.log("Second button clicked");
-		await actions.runAiChat("`[R]OLE[X]`");
+                await actions.runAiChat("`[R]OLE[X]`");
         await mainLoop();
     } catch (error) {
         await handleError(error);
