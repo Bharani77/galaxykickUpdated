@@ -21,7 +21,7 @@ async function setupBrowser() {
       ]
     });*/
     browser = await chromium.launch({
-      headless: false,
+      headless: true,
       defaultViewport: null,
       args: [
         '--no-sandbox',
