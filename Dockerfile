@@ -51,6 +51,8 @@ RUN npm install puppeteer axios && \
     npx puppeteer install && \
     npx puppeteer browsers install chrome
 
+RUN npm install playwright
+RUN npx playwright install
 # Install PM2 globally
 RUN npm install -g pm2
 
