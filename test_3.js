@@ -2,13 +2,56 @@ const { chromium } = require('playwright');
 const axios = require('axios');
 const WebSocket = require('ws');
 const PORT = 8082;
-const TIMEOUT = 3000;
+const TIMEOUT = 500;
 const SCROLL_POSITION = 288452.8229064941406;
 const processedQueries = new Set();
 const wss = new WebSocket.Server({ port: PORT });
 
 let browser;
 let page;
+
+class FrameManager {
+  constructor(page) {
+    this.page = page;
+    this.frameCache = new Map();
+    this.elementCache = new Map();
+  }
+
+  async getFrame(frameIndex) {
+    if (this.frameCache.has(frameIndex)) {
+      return this.frameCache.get(frameIndex);
+    }
+
+    const frames = await this.page.frames();
+    if (frameIndex < frames.length && frameIndex >= 0) {
+      const frame = frames[frameIndex];
+      this.frameCache.set(frameIndex, frame);
+      return frame;
+    } else {
+      throw new Error(`Frame index ${frameIndex} is out of range.`);
+    }
+  }
+
+  async getElementLocator(frameIndex, selectorType, selector) {
+    const cacheKey = `${frameIndex}:${selectorType}:${selector}`;
+    if (this.elementCache.has(cacheKey)) {
+      return this.elementCache.get(cacheKey);
+    }
+
+    const frame = await this.getFrame(frameIndex);
+    let elementLocator;
+    if (selectorType === 'xpath') {
+      elementLocator = frame.locator(`xpath=${selector}`);
+    } else if (selectorType === 'css') {
+      elementLocator = frame.locator(selector);
+    } else {
+      throw new Error(`Unsupported selector type: ${selectorType}`);
+    }
+
+    this.elementCache.set(cacheKey, elementLocator);
+    return elementLocator;
+  }
+}
 
 async function setupBrowser() {
   console.log('Launching browser...');
@@ -206,63 +249,27 @@ const actions = {
   return { status: 'success', action: 'runAiChat', message: "Successfully started AiChat" };
 },
 
-  async switchToFrame({ frameIndex, selectorType, selector }) {
-    const frames = await page.frames();
-    console.log('Total frames:', frames.length);
-    if (frameIndex <= frames.length && frameIndex >= 0) {
-      await page.evaluate((index, selType, sel) => {
-        const iframe = document.querySelectorAll('iframe')[index];
-        let contentElement;
-        if (selType === 'xpath') {
-          contentElement = iframe.contentDocument.evaluate(sel, iframe.contentDocument, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        } else if (selType === 'css') {
-          contentElement = iframe.contentDocument.querySelector(sel);
-        }
-        if (contentElement && contentElement.offsetParent !== null) {
-          contentElement.click();
-        } else {
-          throw new Error('Element not found');
-        }
-      }, frameIndex, selectorType, selector);
-      return { status: 'success', action: 'switchToFrame', message: frameIndex };
-    }
-    return { status: 'error', action: 'switchToFrame', message: 'Frame index out of range' };
-  },
+async switchToFrame({ frameIndex, selectorType, selector }) {
+  const frameManager = new FrameManager(page);
+  const element = await frameManager.getElementLocator(frameIndex, selectorType, selector);
+  await element.click();
+  return { status: 'success', action: 'switchToFrame', message: frameIndex };
+},
 
-  async switchToFramePlanet({ frameIndex, selectorType, selector }) {
-    await page.mainFrame();
-    const frames = await page.frames();
-    if (frameIndex <= frames.length && frameIndex >= 0) {
-      await page.evaluate((index, selType, sel) => {
-        const iframe = document.querySelectorAll('iframe')[index];
-        let contentElement;
-        if (selType === 'xpath') {
-          contentElement = iframe.contentDocument.evaluate(sel, iframe.contentDocument, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        } else if (selType === 'css') {
-          contentElement = iframe.contentDocument.querySelector(sel);
-        }
-        if (contentElement) {
-          contentElement.click();
-          this.reloadPage();
-        } else {
-          throw new Error('Element not found');
-        }
-      }, frameIndex, selectorType, selector);
-      return { status: 'success', action: 'switchToDefaultFrame', message: "Successfully clicked" };
-    }
-  },
+async switchToFramePlanet({ frameIndex, selectorType, selector }) {
+  const frameManager = new FrameManager(page);
+  const element = await frameManager.getElementLocator(frameIndex, selectorType, selector);
+  await element.click();
+  return { status: 'success', action: 'switchToFramePlanet', message: "Successfully clicked and navigated" };
+},
 
-  async switchToDefaultFrame({ selector }) {
-    await page.mainFrame();
-    await page.evaluate((sel) => {
-      const element = document.querySelector(sel);
-      if (element) {
-        element.click();
-      }
-      return { success: false, message: 'Element not found' };
-    }, selector);
-    return { status: 'success', action: 'switchToDefaultFrame', message: "Successfully clicked" };
-  },
+async switchToDefaultFrame({ selector }) {
+  const frameManager = new FrameManager(page);
+  await page.mainFrame();
+  const element = await frameManager.getElementLocator(0, 'css', selector);
+  await element.click();
+  return { status: 'success', action: 'switchToDefaultFrame', message: "Successfully clicked" };
+},
 
   async doubleClick({ selector }) {
     try {
@@ -286,15 +293,16 @@ const actions = {
     }
   },
 
-  async click({ selector }) {
-    try {
-      await page.waitForSelector(selector, { timeout: TIMEOUT });
-      await page.click(selector);
-      return { status: 'success', action: 'click', selector };
-    } catch (error) {
-      throw new Error(`Error with element ${selector}: ${error.message}`);
-    }
-  },
+ async click({ selector }) {
+  try {
+    const element = page.locator(selector).first(); // Direct locator reference with auto-wait
+    await element.click();
+    return { status: 'success', action: 'click', selector };
+  } catch (error) {
+    throw new Error(`Error with element ${selector}: ${error.message}`);
+  }
+},
+
 
   async enhancedSearchAndClick({ position }) {
     try {
@@ -439,19 +447,13 @@ const actions = {
   },
 
   async xpath({ xpath }) {
-    const clickResult = await page.evaluate((xpathExpression) => {
-      const element = document.evaluate(xpathExpression, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-      if (element) {
-        element.click();
-        return { success: true, message: 'Element clicked successfully' };
-      }
-      return { success: false, message: 'Element not found' };
-    }, xpath);
-
-    if (!clickResult.success) {
-      throw new Error(clickResult.message);
-    }
+  try {
+    const element = page.locator(`xpath=${xpath}`);
+    await element.click();
     return { status: 'success', action: 'xpath', selector: xpath };
+  } catch (error) {
+    throw new Error(`Error with XPath ${xpath}: ${error.message}`);
+  }
   },
 
   async sleep({ ms }) {
@@ -496,10 +498,19 @@ const actions = {
     try {
         // Create a locator for the given selector
         const locator = page.locator(selector);
+		const isSelectorPresent = await locator.count() > 0;
 
+        if (!isSelectorPresent) {
+            return {
+                status: 'error',
+                action: 'checkUsername',
+                matches: false,
+                message: `Selector not found`
+            };
+        }
         // Get all text contents from the matched elements using locator
         const elementTexts = await locator.allTextContents();
-
+		
         // If expectedText is an array, check if any rival name matches any element
         if (Array.isArray(expectedText)) {
             const matches = expectedText.some(name => elementTexts.includes(name));
