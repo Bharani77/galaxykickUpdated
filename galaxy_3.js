@@ -436,26 +436,17 @@ async function checkIfInPrison(planetName) {
 
 async function autoRelease() {
     try {
-           //actions.sleep(3000);
            const actionss = [
             { action: 'xpath', xpath: "//span[contains(.,'Planet Info')]" },
-            { action: 'sleep', ms: 3000 },
-            { action: 'switchToFrame', frameIndex: 1, selectorType: 'css', selector: '.free__early__release:nth-child(2) .free__early__release__title' },
-            { action: 'sleep', ms: 250 },
-            { action: 'switchToFrame', frameIndex: 1, selectorType: 'css', selector: '#yes_btn > p' },
-            { action: 'sleep', ms: 250 },
-            { action: 'switchToDefaultFrame', selector: '.mdc-icon-button > img' },
-            { action: 'sleep', ms: 4000 },
-            { action: 'switchToFrame', frameIndex: 1, selectorType: 'css', selector: '.s__gd__plank:nth-child(1) .text' },
-            { action: 'sleep', ms: 500 },
-            { action: 'switchToFramePlanet', frameIndex: 2, selectorType: 'css', selector: 'div.gc-action > a' }
+            { action: 'switchToFrame', frameIndex: 2, selectorType: 'css', selector: '.free__early__release:nth-child(2) .free__early__release__title' },
+            { action: 'switchToFrame', frameIndex: 2, selectorType: 'css', selector: '#yes_btn > p' },
+            { action: 'switchToDefaultFrame', selector: 'button:nth-child(2) > img' },
+            { action: 'switchToFrame', frameIndex: 2, selectorType: 'css', selector: '.s__gd__plank:nth-child(1) .text' },
+            { action: 'switchToFramePlanet', frameIndex: 3, selectorType: 'css', selector: 'div.gc-action > a' }
         ];
-
         for (const action of actionss) {
-            
             await sendMessage(action);
         } 
-       
         console.log("Auto-release successful");
     } catch (error) {
         console.error("Error in autoRelease:", error);
@@ -480,31 +471,23 @@ async function executeRivalChecks(planetName) {
 
 async function imprison() {
     try {
-        // Initial click sequence to open the events panel
-        const initialActions = [
-            { action: 'click', selector: ".planet__events" },
-            { action: 'click', selector: ".planet__events" },
-            { action: 'click', selector: ".planet__events" },
-        ];
-        
-        for (const action of initialActions) {
-            await sendMessage(action);
-        }
 
         // First verification: Check if rival is present in the planet
         let rivalCheckResult1 = await actions.checkUsername(config.rival);
 
         if (rivalCheckResult1) {
             console.log("Rival verified successfully, proceeding with imprisonment");
-            
             // Proceed with imprisonment sequence
             const imprisonSequence = [
-                                { action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
-                { action: 'performSequentialActions', actions: [
+					//{ action: 'click', selector: ".planet__events" },
+					//{ action: 'click', selector: ".planet__events" },
+					//{ action: 'click', selector: ".planet__events" },
+					{ action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
+					{ action: 'performSequentialActions', actions: [
                     { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" },
                     { type: 'click', selector: '.dialog__close-button > img' },
                     { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-                ]},
+                ]}
                 //{ action: 'click', selector: '.start__user__nick' }
             ];
 
@@ -516,34 +499,12 @@ async function imprison() {
 			await actions.reloadPage();
         } else {
             console.log("Rival verification failed, safely exiting");
-            
-            // Safe exit sequence
-            const exitSequence = [
-                { action: 'performSequentialActions', actions: [
-                    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-                ]},
-                //{ action: 'click', selector: '.start__user__nick' }
-            ];
-
-            for (const action of exitSequence) {
-                await sendMessage(action);
-            }
 			await actions.reloadPage();
         }
     } catch (error) {
         console.error("Error in imprison:", error);
         // Ensure safe exit even in case of error
         try {
-            const exitSequence = [
-                { action: 'performSequentialActions', actions: [
-                    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-                ]},
-                { action: 'click', selector: '.start__user__nick' }
-            ];
-
-            for (const action of exitSequence) {
-                await sendMessage(action);
-            }
 			await actions.reloadPage();
         } catch (exitError) {
             console.error("Error during safe exit:", exitError);
@@ -575,17 +536,16 @@ async function mainLoop() {
                 if (isInPrison) {
                     console.log("In prison. Executing auto-release...");
                     await autoRelease();
-                    await actions.waitForClickable('.planet-bar__button__action > img');
+					//await actions.reloadPage();
                     continue;
                 }
-
                 console.log(`New loop iteration started at: ${new Date().toISOString()}`);
                 await executeRivalChecks(config.planetName);
-
+				await actions.sleep(150);
                 let searchResult = await actions.searchAndClick({ selector: 'li', rivals: config.rival });
                 let found = searchResult.matchedRival;
                 console.log("Matched Rival flag",found);
-                                console.log("Matched Rival flag",searchResult.flag);
+                console.log("Matched Rival flag",searchResult.flag);
                 if (searchResult.flag && found) {
                     let rivalFoundTime = performance.now();
                     let elapsedTime = rivalFoundTime - loopStartTime;
@@ -655,7 +615,7 @@ async function initialConnection() {
         console.log("Recovery code entered");
         await actions.click('.mdc-dialog__button:nth-child(2)');
         console.log("Second button clicked");
-                await actions.runAiChat("`[R]OLE[X]`");
+        await actions.runAiChat("`[R]OLE[X]`");
         await mainLoop();
     } catch (error) {
         await handleError(error);
