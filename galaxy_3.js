@@ -478,19 +478,10 @@ async function imprison() {
         if (rivalCheckResult1) {
             console.log("Rival verified successfully, proceeding with imprisonment");
             // Proceed with imprisonment sequence
-			const imprisonSequence1 = [
-			{ action: 'performSequentialActions', actions: [
-                    { action: 'performSequentialActions', actions: [
-					{ type: 'click', selector: ".planet__events" },
-					{ type: 'click', selector: ".planet__events" },
-					{ type: 'click', selector: ".planet__events" },
-                ]},
-                ]},
-			];
-			for (const action1 of imprisonSequence1) {
-                await sendMessage(action1);
-            }
             const imprisonSequence = [
+					{ action: 'click', selector: ".planet__events" },
+					{ action: 'click', selector: ".planet__events" },
+					{ action: 'click', selector: ".planet__events" },
 					{ action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
 					{ action: 'performSequentialActions', actions: [
                     { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" }
