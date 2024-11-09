@@ -484,11 +484,11 @@ async function imprison() {
 					//{ action: 'click', selector: ".planet__events" },
 					{ action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
 					{ action: 'performSequentialActions', actions: [
-                    { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" },
-                    { type: 'click', selector: '.dialog__close-button > img' },
-                    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-                ]}
-                //{ action: 'click', selector: '.start__user__nick' }
+                    { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" }
+                //    { type: 'click', selector: '.dialog__close-button > img' },
+                //    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
+                ]},
+               // { action: 'click', selector: '.start__user__nick' }
             ];
 
             for (const action of imprisonSequence) {
@@ -527,84 +527,88 @@ async function waitForElement(selector, maxAttempts = 5, interval = 50) {
 }
 
 async function mainLoop() {
-        while (true) {
-            try {
-                const loopStartTime = performance.now();
-                await actions.waitForClickable('.planet__events');
-
-                const isInPrison = await checkIfInPrison(config.planetName);
-                if (isInPrison) {
-                    console.log("In prison. Executing auto-release...");
-                    await autoRelease();
-					//await actions.reloadPage();
-                    continue;
-                }
-                console.log(`New loop iteration started at: ${new Date().toISOString()}`);
-                await executeRivalChecks(config.planetName);
-				await actions.sleep(150);
-                let searchResult = await actions.searchAndClick({ selector: 'li', rivals: config.rival });
-                let found = searchResult.matchedRival;
-                console.log("Matched Rival flag",found);
-                console.log("Matched Rival flag",searchResult.flag);
-                if (searchResult.flag && found) {
-                    let rivalFoundTime = performance.now();
-                    let elapsedTime = rivalFoundTime - loopStartTime;
-                    console.log(`Time elapsed since loop start: ${elapsedTime}ms`);
-                    
-                    // Get prediction from enhanced ML model
-                    const predictedTiming = mlModel.predictTiming(
-                        config.AttackTime,
-                        config.DefenceTime,
-                        config.interval
-                    );
-                    
-                    // Log enhanced timing information
-                    console.log(`ML predicted timing: ${predictedTiming}ms`);
-                    console.log(`Estimated system latency: ${mlModel.getEstimatedLatency()}ms`);
-                    console.log(`Recent success rate: ${(mlModel.getSuccessRate() * 100).toFixed(2)}%`);
-                    
-                    // Execute attack with timing measurements
-                    await executeAttackSequence(elapsedTime, predictedTiming);
-                } else {
-                    // Record failed attempt with actual execution time
-                    const executionTime = performance.now() - loopStartTime;
-                    mlModel.recordResult(config.AttackTime, false, executionTime);
-                }
-            } catch (error) {
-                await handleError(error);
+    let previousFlag = 1; // Initialize with 1 as default state
+    
+    while (true) {
+        try {
+            await actions.waitForClickable('.planet__events');
+            const loopStartTime = performance.now();
+            
+            const isInPrison = await checkIfInPrison(config.planetName);
+            if (isInPrison) {
+                console.log("In prison. Executing auto-release...");
+                await autoRelease();
+                continue;
             }
+
+            await executeRivalChecks(config.planetName);
+            
+            const searchStartTime = performance.now();
+            const searchResult = await actions.searchAndClick({ selector: 'li', rivals: config.rival });
+            const searchEndTime = performance.now();
+
+            const searchDuration = searchEndTime - searchStartTime;
+            console.log(`Search duration: ${formatTiming(searchDuration)}`);
+            
+            // Set current flag based on search result
+            flag = searchResult.flag && searchResult.matchedRival ? 1 : 0;
+            console.log(`Current flag status: ${flag}, Previous flag status: ${previousFlag}`);
+            
+            if (flag === 1) {
+                let elapsedTime = searchEndTime - loopStartTime;
+                
+                // Check if previous loop had flag = 0, if yes, add 200ms to elapsed time
+                if (previousFlag === 0) {
+                    console.log(`Previous loop had flag = 0, adding 200ms to elapsed time`);
+                    elapsedTime -= 450;
+                }
+                
+                console.log(`Total elapsed time (with adjustments): ${formatTiming(elapsedTime)}`);
+                
+                const predictedTiming = mlModel.predictTiming(
+                    config.AttackTime,
+                    config.DefenceTime,
+                    config.interval
+                );
+                
+                console.log(`ML predicted timing: ${formatTiming(predictedTiming)}`);
+                console.log(`Estimated latency: ${formatTiming(mlModel.getEstimatedLatency())}`);
+                console.log(`Success rate: ${(mlModel.getSuccessRate() * 100).toFixed(2)}%`);
+                
+                await executeAttackSequence(elapsedTime, predictedTiming);
+                
+            } else {
+                const failureTime = performance.now() - loopStartTime;
+                mlModel.recordResult(config.AttackTime, false, failureTime);
+
+            }
+            
+            // Store current flag as previous flag for next iteration
+            previousFlag = flag;
+            
+        } catch (error) {
+            console.error("Error in main loop:", error);
+            await handleError(error);
         }
     }
-
+}
 
 async function executeAttackSequence(elapsedTime, predictedTiming) {
     const startTime = performance.now();
+    let totalWaitTime = Math.max(0, predictedTiming - elapsedTime);
     
-    // Wait for the predicted timing
     if (predictedTiming > 0) {
-        console.log(`Pausing for ${predictedTiming}ms`);
+        console.log(`Waiting for ${formatTiming(predictedTiming)}`);
         await actions.sleep(predictedTiming);
     }
     
-    // Execute the kick
-    //const rivalCheckStart = performance.now();
-    //await executeRivalChecks(config.planetName);
+    await imprison();
     
-    //const searchResult = await actions.searchAndClick(config.rival);
-    //const success = searchResult.flag && searchResult.matchedRival;
-        //console.log("Success flag result",success);
-    
-    // Record the result
-    //const executionTime = performance.now() - startTime;
-    //mlModel.recordResult(predictedTiming, success, executionTime);
-    
-    //if (success) {
-        await imprison();
-        console.log(`Successful kick with timing ${predictedTiming}ms`);
-    //} else {
-    //    console.log(`Failed kick with timing ${predictedTiming}ms`);
-    //}
+    const executionTime = performance.now() - startTime;
+    console.log(`Attack execution time: ${formatTiming(executionTime)}`);
+    mlModel.recordResult(predictedTiming, true, executionTime);
 }
+
 async function initialConnection() {
     try {
         await actions.waitForClickable('.mdc-button--black-secondary > .mdc-button__label');
