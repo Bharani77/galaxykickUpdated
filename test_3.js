@@ -98,40 +98,39 @@ async function setupBrowser() {
   }
 }
 
-async function configurePage() {
-  const maxViewport = await page.evaluate(() => ({
-    width: window.screen.availWidth,
-    height: window.screen.availHeight,
-  }));
-  await page.setViewportSize(maxViewport);
-
-  await page.evaluate(() => {
-    if (document.documentElement.requestFullscreen) {
-      document.documentElement.requestFullscreen();
-    }
-  });
+async function configurePage(page) {
+  const context = page.context();
   
-
-/*  const client = await page.target().createCDPSession();
-  await Promise.all([
-    client.send('Network.enable'),
-    client.send('Network.emulateNetworkConditions', {
-      offline: false,
-      latency: 0,
-      downloadThroughput: 100 * 1024 * 1024 / 8,
-      uploadThroughput: 100 * 1024 * 1024 / 8,
-    }),
-    client.send('Emulation.setCPUThrottlingRate', { rate: 1 }),
-  ]);
-  await page.setRequestInterception(true);
-  page.on('request', (request) => {
-    ['font', 'image', 'media'].includes(request.resourceType())
-      ? request.abort()
-      : request.continue();
+  // Set realistic viewport
+  await page.setViewportSize({
+    width: 1920,
+    height: 1080
   });
 
-  await page.setCacheEnabled(true);
-*/
+  // Network throttling (more reliable approach)
+  await context.route('**/*', async route => {
+    const request = route.request();
+    const resourceType = request.resourceType();
+    
+    // Block unnecessary resources
+    if (['font', 'image', 'media'].includes(resourceType)) {
+      await route.abort();
+      return;
+    }
+    
+    // Apply throttling to other requests
+    await route.continue({
+      throttling: {
+        downloadThroughput: 1024 * 1024, // 1 Mbps
+        uploadThroughput: 1024 * 1024,
+        latency: 100 // ms
+      }
+    });
+  });
+
+  // Enable caching
+  await context.setCacheEnabled(true);
+
 }
 
 async function navigateToGalaxy() {
