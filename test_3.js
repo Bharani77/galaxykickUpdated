@@ -6,7 +6,7 @@ const TIMEOUT = 500;
 const SCROLL_POSITION = 288452.8229064941406;
 const processedQueries = new Set();
 const wss = new WebSocket.Server({ port: PORT });
-
+let cachedStartNickElement = null;
 let browser;
 let page;
 
@@ -293,10 +293,30 @@ async switchToDefaultFrame({ selector }) {
     }
   },
 
- async click({ selector }) {
+async click({ selector }) {
   try {
-    const element = page.locator(selector).first(); // Direct locator reference with auto-wait
-    await element.click();
+    if (selector === '.start__user__nick') {
+      // Always ensure we have a fresh handle after navigation
+      await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => {});
+      
+      // Get fresh element with reduced timeout since we know it exists
+      const element = await page.waitForSelector(selector, {
+        state: 'attached',
+        timeout: 2000
+      });
+      
+      // Click with optimized settings
+      await element.click({
+        force: true,
+        timeout: 1000,
+        noWaitAfter: true
+      });
+    } else {
+      // Normal behavior for other selectors
+      const element = page.locator(selector).first();
+      await element.click();
+    }
+
     return { status: 'success', action: 'click', selector };
   } catch (error) {
     throw new Error(`Error with element ${selector}: ${error.message}`);
@@ -406,7 +426,7 @@ async switchToDefaultFrame({ selector }) {
     const locator = page.locator(selector);
     await locator.waitFor({
       state: 'visible',    // Wait for the element to be visible
-      timeout: 3500        // Timeout after 3500 ms
+      timeout: 10000        // Timeout after 3500 ms
     });
 
     // Check if the element is enabled (clickable)
