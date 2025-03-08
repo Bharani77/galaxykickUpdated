@@ -129,7 +129,7 @@ async function configurePage(page) {
   });
 
   // Enable caching
-  await context.setCacheEnabled(true);
+ // await context.setCacheEnabled(true);
 
 }
 
