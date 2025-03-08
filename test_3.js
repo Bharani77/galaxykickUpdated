@@ -90,7 +90,7 @@ async function setupBrowser() {
     page = await browser.newPage();
     console.log('New page created');
 
-    await configurePage();
+    await configurePage(page);
     await navigateToGalaxy();
     await injectCSS();
   } catch (error) {
