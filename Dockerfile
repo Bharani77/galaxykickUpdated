@@ -60,7 +60,7 @@ RUN npm install -g pm2
 
 RUN apt-get install jq
 # Make sure start.sh is executable
-RUN chmod +x /galaxybackend/start.sh
-
+#RUN chmod +x /galaxybackend/start.sh
+EXPOSE 7860
 # Command to run the deployment script, then start the Python app
-CMD ["sh", "-c", "/galaxybackend/start.sh && python3 /galaxybackend/app.py"]
+CMD ["sh", "-c", "python3 /galaxybackend/app.py"]

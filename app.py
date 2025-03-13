@@ -93,4 +93,4 @@ if __name__ == '__main__':
     for form_number in [1, 2, 3, 4, 5]:
         start_test_js(form_number)
     
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=7860)
