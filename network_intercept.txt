@@ -1,0 +1,96 @@
+// ==UserScript==
+// @name         Instant Beast Presence Tracker
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Tracks BEAST presence duration with immediate console output on exit
+// @author       You
+// @match        https://galaxy.mobstudio.ru/web/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const TARGET_UID = '57292266';
+    let sessionStart = null;
+    let beastTimings = [];
+    let currentBeast = null;
+
+    // High-resolution timer
+    const getTime = () => performance.now();
+
+    // Network monitoring
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const url = args[0]?.url || args[0]?.toString() || '';
+        if (url.includes(TARGET_UID)) startTracking();
+        return originalFetch.apply(this, args);
+    };
+
+    const originalXHROpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        if (url.includes(TARGET_UID)) startTracking();
+        return originalXHROpen.apply(this, arguments);
+    };
+
+    function startTracking() {
+        if (sessionStart) return;
+
+        sessionStart = getTime();
+        console.log(`🚀 Session started at: ${sessionStart.toFixed(3)}ms`);
+
+        // Start element monitoring
+        trackBeastPresence();
+    }
+
+    function trackBeastPresence() {
+        const check = () => {
+            if (!sessionStart) return;
+
+            const elements = Array.from(document.querySelectorAll('.planet-bar__item-name__name'))
+                .filter(el => el.textContent.trim() === ']--BEAST--[');
+
+            const now = getTime();
+            const isPresent = elements.length > 0;
+
+            if (isPresent && !currentBeast) {
+                currentBeast = { start: now };
+              //  console.log(`🐲 BEAST appeared at: ${now.toFixed(3)}ms`);
+            }
+
+            if (!isPresent && currentBeast) {
+                currentBeast.end = now;
+                currentBeast.duration = now - currentBeast.start;
+                beastTimings.push(currentBeast);
+                console.log(`💨 BEAST disappeared after: ${currentBeast.duration.toFixed(3)}ms`);
+                currentBeast = null;
+            }
+
+            requestAnimationFrame(check);
+        };
+        check();
+    }
+
+    // Handle page exit
+    window.addEventListener('beforeunload', () => {
+        if (!sessionStart) return;
+
+        const exitTime = getTime();
+        let totalBeastTime = beastTimings.reduce((sum, entry) => sum + entry.duration, 0);
+
+        // Finalize current BEAST entry if present
+        if (currentBeast) {
+            currentBeast.end = exitTime;
+            currentBeast.duration = exitTime - currentBeast.start;
+            totalBeastTime += currentBeast.duration;
+        }
+
+        // Immediate console report
+       // console.log('\n📊 FINAL RESULTS:');
+       // console.log(`🕒 Total session duration: ${(exitTime - sessionStart).toFixed(3)}ms`);
+       // console.log(`🐉 Total BEAST presence: ${totalBeastTime.toFixed(3)}ms`);
+       // console.log(`📈 BEAST coverage: ${(totalBeastTime / (exitTime - sessionStart) * 100).toFixed(2)}%`);
+    });
+
+    console.log('BEAST Tracker: Ready to monitor');
+})();
