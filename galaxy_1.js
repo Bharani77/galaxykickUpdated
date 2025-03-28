@@ -23,6 +23,16 @@ class EnhancedMLTimingModel {
         this.totalAttempts = 0; // Total attempts across all timings
         this.explorationFactor = Math.sqrt(2); // UCB1 exploration constant (C)
 
+        // --- Added for Dynamic Duration Estimation (EMA) ---
+        this.emaAlpha = 0.1; // Smoothing factor for EMA
+        this.avgPreAttackCheckDuration = 150; // Initial estimate
+        this.avgImprisonDuration = 250;       // Initial estimate
+        // We don't strictly need counts for EMA, but might be useful for debugging
+        // this.preAttackCheckCount = 0;
+        // this.imprisonCount = 0;
+        // --- End Added ---
+
+
         this.loadModel();
     }
 
@@ -33,12 +43,24 @@ class EnhancedMLTimingModel {
                 // Convert loaded object back to Map
                 this.successRatesByTiming = new Map(Object.entries(data.successRatesByTiming || {}));
                 this.totalAttempts = data.totalAttempts || 0;
+
+                // --- Load EMA state ---
+                this.avgPreAttackCheckDuration = data.avgPreAttackCheckDuration === undefined ? 150 : data.avgPreAttackCheckDuration;
+                this.avgImprisonDuration = data.avgImprisonDuration === undefined ? 250 : data.avgImprisonDuration;
+                // --- End Load ---
+
                 console.log(`Loaded UCB model state: ${this.successRatesByTiming.size} timing bins, ${this.totalAttempts} total attempts.`);
+                console.log(`Loaded Avg Durations: PreAttackCheck=${formatTiming(this.avgPreAttackCheckDuration)}, Imprison=${formatTiming(this.avgImprisonDuration)}`);
+
             } else {
                  console.log("No existing UCB model state found. Starting fresh.");
+                 // Keep initial default estimates if no file exists
             }
         } catch (error) {
             console.error('Error loading UCB ML model:', error);
+            // Keep initial default estimates on error
+            this.avgPreAttackCheckDuration = 150;
+            this.avgImprisonDuration = 250;
         }
     }
 
@@ -47,7 +69,11 @@ class EnhancedMLTimingModel {
             const data = {
                 // Convert Map to plain object for JSON serialization
                 successRatesByTiming: Object.fromEntries(this.successRatesByTiming),
-                totalAttempts: this.totalAttempts
+                totalAttempts: this.totalAttempts,
+                // --- Save EMA state ---
+                avgPreAttackCheckDuration: this.avgPreAttackCheckDuration,
+                avgImprisonDuration: this.avgImprisonDuration
+                // --- End Save ---
             };
             fs.writeFileSync('ml_model_state_ucb.json', JSON.stringify(data));
         } catch (error) {
@@ -157,12 +183,29 @@ class EnhancedMLTimingModel {
          console.warn("getEstimatedLatency is not accurately implemented with the current UCB1 model state.");
          return 0; // Placeholder
      }
+
+    // --- Methods for Updating EMA Durations ---
+    updatePreAttackCheckDuration(measuredDuration) {
+        if (typeof measuredDuration !== 'number' || isNaN(measuredDuration) || measuredDuration < 0) return;
+        // EMA formula: NewAvg = alpha * measurement + (1 - alpha) * OldAvg
+        this.avgPreAttackCheckDuration = (this.emaAlpha * measuredDuration) + (1 - this.emaAlpha) * this.avgPreAttackCheckDuration;
+        // console.log(`Updated Avg PreAttackCheck Duration: ${formatTiming(this.avgPreAttackCheckDuration)}`); // Optional log
+    }
+
+    updateImprisonDuration(measuredDuration) {
+        if (typeof measuredDuration !== 'number' || isNaN(measuredDuration) || measuredDuration < 0) return;
+        // EMA formula: NewAvg = alpha * measurement + (1 - alpha) * OldAvg
+        this.avgImprisonDuration = (this.emaAlpha * measuredDuration) + (1 - this.emaAlpha) * this.avgImprisonDuration;
+        // console.log(`Updated Avg Imprison Duration: ${formatTiming(this.avgImprisonDuration)}`); // Optional log
+    }
+    // --- End EMA Methods ---
 }
 
 
 const mlModel = new EnhancedMLTimingModel();
 
 
+// Remove estimated durations from static config, they are now dynamic in mlModel
 let config = {
     RC: '',
     AttackTime: 0,
@@ -176,16 +219,28 @@ let config = {
 function loadConfig() {
     try {
         const data = fs.readFileSync('config1.json', 'utf8');
-        Object.assign(config, JSON.parse(data));
+        const loadedConfig = JSON.parse(data);
+
+        // Assign loaded values
+        config.RC = loadedConfig.RC || '';
+        config.AttackTime = loadedConfig.AttackTime || 0;
+        config.DefenceTime = loadedConfig.DefenceTime || 0;
+        config.planetName = loadedConfig.planetName || '';
+        config.interval = loadedConfig.interval || 0;
+        // Note: estimated durations are NOT loaded from config anymore
+
+        // Handle rival array
+        config.rival = Array.isArray(loadedConfig.rival) ? loadedConfig.rival : (loadedConfig.rival ? [loadedConfig.rival] : []);
+        config.rival = config.rival.map(r => r.trim());
+
+        // Update derived values
         config.DefenceTime1 = config.DefenceTime;
         tempTime1 = config.AttackTime;
-        
-        config.rival = Array.isArray(config.rival) ? config.rival : [config.rival];
-        config.rival = config.rival.map(r => r.trim());
-        
+
         console.log('Config updated:', config);
     } catch (err) {
-        console.error('Error reading config file:', err);
+        console.error('Error reading or parsing config file:', err);
+        // Keep existing config or defaults if loading fails
     }
 }
 
@@ -255,7 +310,7 @@ async function sendMessage(message) {
 
             clearTimeout(timeout);
             socket.removeEventListener('message', messageHandler);
-            
+
             if (response.status === 'success') {
                 resolve(response);
             } else {
@@ -328,8 +383,8 @@ const actions = {
 			// Convert single rival to array if needed
 			const rivalsArray = Array.isArray(rivals) ? rivals : [rivals];
 			const quotedRivals = rivalsArray.map(r => `${r.trim()}`);
-			const result = await sendMessage({ 
-				action: 'checkUsername', 
+			const result = await sendMessage({
+				action: 'checkUsername',
 				selector: '.planet-bar__item-name__name',
 				expectedText: quotedRivals // Send array of trimmed rival names
 			});
@@ -395,13 +450,15 @@ async function autoRelease() {
         ];
 
         for (const action of actionss) {
-            
+
             await sendMessage(action);
-        } 
-       
-        console.log("Auto-release successful");
+        }
+
+        console.log("Auto-release successful. Reloading page...");
+        await actions.reloadPage(); // Ensure reload is present
     } catch (error) {
         console.error("Error in autoRelease:", error);
+        // Consider if reload is needed on error too, maybe not if main loop handles errors
         throw error;
     }
 }
@@ -429,7 +486,7 @@ async function imprison() {
             { action: 'click', selector: ".planet__events" },
             { action: 'click', selector: ".planet__events" },
         ];
-        
+
         for (const action of initialActions) {
             await sendMessage(action);
         }
@@ -439,54 +496,40 @@ async function imprison() {
 
         if (rivalCheckResult1) {
             console.log("Rival verified successfully, proceeding with imprisonment");
-            
+
             // Proceed with imprisonment sequence
             const imprisonSequence = [
-				{ action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
+                { action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
                 { action: 'performSequentialActions', actions: [
                     { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" },
-                    { type: 'click', selector: '.dialog__close-button > img' },
+                    { type: 'click', selector: '.dialog__close-button > img'},
                     { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-                ]},
-                { action: 'sleep', ms: 450 },
-                { action: 'click', selector: '.start__user__nick' }
+                ]}
+                // Removed sleep and click, replaced with reload below
             ];
 
             for (const action of imprisonSequence) {
                 await sendMessage(action);
             }
-            
-            console.log("Imprison actions completed successfully");
-            await actions.sleep(100);
-        } else {
-            console.log("Rival verification failed, safely exiting");
-            
-            // Safe exit sequence
-            const exitSequence = [
-                { action: 'performSequentialActions', actions: [
-                    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-                ]},
-                { action: 'sleep', ms: 450 },
-                { action: 'click', selector: '.start__user__nick' }
-            ];
 
-            for (const action of exitSequence) {
-                await sendMessage(action);
-            }
+            console.log("Imprison actions completed successfully, reloading page...");
+            await actions.reloadPage(); // Reload after successful imprison
+
+        } else {
+            console.log("Rival verification failed, reloading page...");
+            // Safe exit sequence replaced with reload
+            await actions.reloadPage(); // Reload if rival check fails
         }
     } catch (error) {
-        console.error("Error in imprison:", error);
-        // Ensure safe exit even in case of error
+        console.error("Error during imprison:", error);
+        // Ensure safe exit even in case of error by reloading
         try {
-            await sendMessage({ 
-                action: 'performSequentialActions', 
-                actions: [{ type: 'xpath', xpath: "//a[contains(.,'Exit')]" }]
-            });
-            await actions.sleep(450);
-            await actions.click('.start__user__nick');
-        } catch (exitError) {
-            console.error("Error during safe exit:", exitError);
+            console.log("Attempting reload after imprison error...");
+            await actions.reloadPage();
+        } catch (reloadError) {
+            console.error("Error during safe exit reload:", reloadError);
         }
+        // Re-throw the original error so executeAttackSequence knows it failed
         throw error;
     }
 }
@@ -505,101 +548,270 @@ async function waitForElement(selector, maxAttempts = 5, interval = 50) {
 }
 
 async function mainLoop() {
-        while (true) {
-            try {
-                const loopStartTime = performance.now();
-                await actions.waitForClickable('.planet__events');
-                await actions.sleep(50);
+    while (true) {
+        try {
+            // Start timing closer to the critical checks
+            await actions.waitForClickable('.planet__events'); // Ensure UI is ready
 
-                const isInPrison = await checkIfInPrison(config.planetName);
-                if (isInPrison) {
-                    console.log("In prison. Executing auto-release...");
-                    await autoRelease();
-                    await actions.waitForClickable('.planet-bar__button__action > img');
-                    continue;
+            // --- Prison Check ---
+            const prisonCheckStart = performance.now();
+            const isInPrison = await checkIfInPrison(config.planetName);
+            const prisonCheckDuration = performance.now() - prisonCheckStart;
+            // console.log(`Prison check took: ${formatTiming(prisonCheckDuration)}`); // Optional detailed logging
+            if (isInPrison) {
+                console.log("In prison. Executing auto-release...");
+                await autoRelease();
+                // await actions.waitForClickable('.planet-bar__button__action > img'); // Wait after release
+                continue; // Restart loop after release
+            }
+
+            // --- Critical Rival & Planet Checks ---
+            const criticalCheckStart = performance.now(); // Start timing for essential checks
+
+            // 1. Check Planet Name and Online Status (Minimal sleep/wait)
+            let planetOk = false;
+            try {
+                // Reverted back to actions.xpath as waitForClickable timed out
+                console.log(`Checking for planet: ${config.planetName}`);
+                await actions.xpath(`//span[contains(.,'${config.planetName}')]`);
+                console.log(`Checking for 'Online now'`);
+                await actions.xpath(`//span[contains(.,'Online now')]`);
+                console.log("Clicked 'Online now'. Waiting for list..."); // Log update
+                await actions.sleep(300); // *** INCREASED/ADDED: Wait longer after clicking 'Online now' for list to appear ***
+                console.log("Planet and Online status confirmed via xpath.");
+                planetOk = true;
+                // Removed the sleep(150) from here, moved it after 'Online now' click.
+            } catch (planetError) {
+                 console.log(`Planet/Online check failed via xpath: ${planetError.message}. Retrying next loop.`);
+                 await actions.sleep(1000); // Wait longer if planet isn't right before next loop
+                 continue; // Skip to next iteration
+            }
+
+            // 2. Wait for and Verify Rival Presence using XPath
+            let rivalPresent = false;
+            let matchedRivalName = null; // Store the name if found
+            let rivalVerificationDuration = 0;
+            if (planetOk) { // Only check if planet is correct
+                const verificationStart = performance.now();
+                console.log("Waiting for rival presence using XPath...");
+                try {
+                    // Loop through configured rivals and wait for XPath match
+                    for (const rival of config.rival) {
+                        const rivalXPath = `//li[contains(., '${rival.trim()}')]`; // XPath to find li containing rival name
+                        try {
+                            // *** Use the new waitForXPath action which does NOT click ***
+                            await actions.waitForXPath({ xpath: rivalXPath }); // Pass xpath as an object property
+                            console.log(`waitForXPath succeeded for rival: ${rival}`);
+                            rivalPresent = true;
+                            matchedRivalName = rival; // Store the matched name
+                            break; // Exit loop once a rival is found
+                        } catch (waitError) {
+                            // Log specific rival failure but continue loop
+                            // console.log(`waitForXPath failed for ${rival}: ${waitError.message}`);
+                        }
+                    }
+                    rivalVerificationDuration = performance.now() - verificationStart;
+                    if (rivalPresent) {
+                        console.log(`Rival '${matchedRivalName}' confirmed present via waitForXPath. Duration: ${formatTiming(rivalVerificationDuration)}`);
+                    } else {
+                        console.log(`No configured rivals found via waitForXPath after checking all. Duration: ${formatTiming(rivalVerificationDuration)}`);
+                    }
+                } catch (generalError) {
+                    // Catch any unexpected errors during the loop/wait process
+                    rivalVerificationDuration = performance.now() - verificationStart;
+                    console.error(`Error during rival XPath verification: ${generalError.message}. Duration: ${formatTiming(rivalVerificationDuration)}`);
+                    rivalPresent = false;
+                }
+            } else {
+                 console.log("Planet check failed, skipping rival verification.");
+            }
+
+            // Calculate total critical check duration (Planet + Rival Check)
+            // Note: criticalCheckStart was before planet check
+            const criticalCheckDuration = performance.now() - criticalCheckStart;
+            console.log(`Critical checks (Planet, Rival Check) total took: ${formatTiming(criticalCheckDuration)}`);
+
+
+            // --- Attack Decision ---
+            // Check the rivalPresent flag determined by waitForXPath
+            if (rivalPresent) {
+                console.log(`Rival '${matchedRivalName}' confirmed present. Proceeding with attack preparation.`); // Updated log
+
+                // *** IMPORTANT: Now click the rival using searchAndClick ***
+                // We should re-use searchAndClick here, but *only* if rivalPresent is true.
+                // This ensures we click the correct rival just before the attack sequence.
+                let clickResult = { flag: false, matchedRival: null };
+                try {
+                    console.log("Attempting to find and click the confirmed rival...");
+                    clickResult = await actions.searchAndClick(config.rival);
+                    if (!clickResult.flag) {
+                        // This should be rare if checkUsername just succeeded, but handle it.
+                        console.warn("searchAndClick failed to find/click the rival immediately after checkUsername succeeded. Aborting attack.");
+                        rivalPresent = false; // Prevent attack sequence
+                    } else {
+                        console.log(`Successfully clicked rival: ${clickResult.matchedRival}`);
+                    }
+                } catch (clickError) {
+                     console.error(`Error during searchAndClick before attack: ${clickError.message}. Aborting attack.`);
+                     rivalPresent = false; // Prevent attack sequence
                 }
 
-                console.log(`New loop iteration started at: ${new Date().toISOString()}`);
-                await actions.sleep(50);
-                await executeRivalChecks(config.planetName);
-                await actions.sleep(300);
-
-                let searchResult = await actions.searchAndClick(config.rival);
-                let found = searchResult.matchedRival;
-                console.log("Matched Rival flag",found);
-				console.log("Matched Rival flag",searchResult.flag);
-                if (searchResult.flag && found) {
-                    let rivalFoundTime = performance.now();
-                    let elapsedTime = rivalFoundTime - loopStartTime;
-                    console.log(`Time elapsed since loop start: ${elapsedTime}ms`);
-                    
+                // Proceed only if click was successful
+                if (rivalPresent) {
                     // Get prediction from the UCB1 ML model
                     const predictedTiming = mlModel.predictTiming(
                         config.AttackTime,
-                        config.DefenceTime // UCB1 doesn't need the 'interval' parameter directly for prediction
+                        config.DefenceTime
                     );
+                    console.log(`UCB1 ML predicted target timing: ${predictedTiming}ms`);
 
-                    // Log timing information
-                    console.log(`UCB1 ML predicted timing: ${predictedTiming}ms`);
-                    // Note: getEstimatedLatency and getSuccessRate might need adjustment or removal
-                    // depending on whether you still need those specific metrics with UCB1.
-                    // console.log(`Estimated system latency: ${mlModel.getEstimatedLatency()}ms`); // May be inaccurate now
-                    // console.log(`Overall success rate: ${(mlModel.getOverallSuccessRate() * 100).toFixed(2)}%`);
+                    // Calculate the *remaining* delay needed...
+                    // The time spent *clicking* the rival should also be accounted for.
+                    // Let's stick to the original calculation for simplicity first, using criticalCheckDuration.
+                    // Get the *current* dynamic estimates from the ML model
+                    const currentAvgPreAttackCheckDuration = mlModel.avgPreAttackCheckDuration;
+                    const currentAvgImprisonDuration = mlModel.avgImprisonDuration;
+                    const estimatedFinalActionsDuration = currentAvgPreAttackCheckDuration + currentAvgImprisonDuration;
 
-                    // Execute attack with timing measurements
-                    await executeAttackSequence(elapsedTime, predictedTiming);
-                } else {
-                    // Record failed attempt with actual execution time
-                    const executionTime = performance.now() - loopStartTime;
-                    mlModel.recordResult(config.AttackTime, false, executionTime);
+                    const targetSleepEndTime = predictedTiming - estimatedFinalActionsDuration;
+                    // Adjust sleep based on time spent *up to the point before sleep starts*.
+                    // This now includes planet check, checkUsername, AND searchAndClick.
+                    const timeBeforeSleep = performance.now() - criticalCheckStart; // Recalculate time spent just before sleep
+                    const adjustedSleepDuration = Math.max(0, targetSleepEndTime - timeBeforeSleep);
+
+                    console.log(`Target Kick Time (Predicted): ${predictedTiming}ms`);
+                    console.log(` - Time Before Sleep (Checks + Click): ${formatTiming(timeBeforeSleep)}`); // Updated log
+                    console.log(` - Avg Final Actions Duration (Check + Imprison): ${formatTiming(estimatedFinalActionsDuration)} (P:${formatTiming(currentAvgPreAttackCheckDuration)}, I:${formatTiming(currentAvgImprisonDuration)})`);
+                    console.log(` = Calculated Sleep Duration: ${formatTiming(adjustedSleepDuration)}`);
+
+                    // Execute attack sequence
+                    // Pass the time spent *before* sleep, which now includes the click time.
+                    await executeAttackSequence(adjustedSleepDuration, predictedTiming, timeBeforeSleep);
                 }
-            } catch (error) {
-                await handleError(error);
+
+            } else {
+                 console.log("Rival not found by checkUsername or planet check failed. Skipping attack.");
+                 await actions.sleep(50); // Reduced wait time
             }
+        } catch (error) {
+            console.error(`Error in main loop: ${error.message}. Stack: ${error.stack}`);
+            // Consider if handleError should be called or if loop should continue
+             await actions.sleep(2000); // Wait after an error before retrying
+            // await handleError(error); // This might reload the page, potentially losing state
         }
     }
+}
 
 
-async function executeAttackSequence(elapsedTime, predictedTiming) {
-    const startTime = performance.now();
-    
-    // Wait for the predicted timing
-    if (predictedTiming > 0) {
-        console.log(`Pausing for ${predictedTiming}ms`);
-        await actions.sleep(predictedTiming);
+// Rename parameter checkDuration to timeBeforeSleep
+async function executeAttackSequence(adjustedSleepDuration, originalPredictedTiming, timeBeforeSleep) {
+    const sequenceStartTime = performance.now(); // Time when this sequence function *starts*
+
+    // Wait for the calculated sleep duration
+    let actualSleepDuration = 0;
+    if (adjustedSleepDuration > 0) {
+        console.log(`Pausing for calculated sleep: ${formatTiming(adjustedSleepDuration)}`);
+        const sleepStart = performance.now();
+        await actions.sleep(adjustedSleepDuration);
+        actualSleepDuration = performance.now() - sleepStart;
+        console.log(`Actual sleep duration: ${formatTiming(actualSleepDuration)}`);
+    } else {
+        console.log("Calculated sleep duration is zero or negative. Proceeding immediately.");
     }
-    
-    // Execute the kick
-    //const rivalCheckStart = performance.now();
-    //await executeRivalChecks(config.planetName);
-    
-    //const searchResult = await actions.searchAndClick(config.rival);
-    //const success = searchResult.flag && searchResult.matchedRival;
-	//console.log("Success flag result",success);
-    
-    // --- IMPORTANT ---
-    // The success/failure check and recording logic was previously commented out here.
-    // It needs to be reinstated and correctly implemented to feed results back to the UCB1 model.
-    // We need to determine the 'success' boolean based on the outcome of 'imprison()'.
-    // For now, let's assume 'imprison()' throws an error on failure or we can add a check after it.
 
-    let success = false;
-    const executionTime = performance.now() - startTime; // Time taken for sleep + imprison attempt
+    const sleepEndTime = performance.now();
+
+    // --- ADDED PRE-ATTACK OPPONENT CHECK ---
+    let opponentStillPresent = false;
+    let actualPreAttackCheckDuration = 0; // Renamed variable
+    const preAttackCheckStart = performance.now();
     try {
-        await imprison();
-        // If imprison() completes without error, assume success
-        success = true;
-        console.log(`Successful kick executed with timing ${predictedTiming}ms. Execution time: ${formatTiming(executionTime)}`);
-    } catch (imprisonError) {
-        // If imprison() throws an error, assume failure
-        success = false;
-        console.error(`Failed kick attempt with timing ${predictedTiming}ms. Error: ${imprisonError.message}. Execution time: ${formatTiming(executionTime)}`);
-        // Decide if you want to re-throw the error or just log it and continue the main loop
-        // throw imprisonError; // Option: Stop the loop on failure
-    } finally {
-        // Record the result (success or failure) in the UCB1 model
-        mlModel.recordResult(predictedTiming, success, executionTime);
+        console.log(`Re-verifying opponent presence before final kick...`);
+        opponentStillPresent = await actions.checkUsername(config.rival); // Use global config
+        actualPreAttackCheckDuration = performance.now() - preAttackCheckStart; // Renamed variable
+        if (opponentStillPresent) {
+            console.log(`Opponent confirmed present after sleep. Proceeding with kick. Pre-attack check took: ${formatTiming(actualPreAttackCheckDuration)}`);
+        } else {
+            // Use actualSleepDuration calculated earlier
+            console.log(`Opponent disappeared during sleep (${formatTiming(actualSleepDuration)}). Aborting kick. Pre-attack check took: ${formatTiming(actualPreAttackCheckDuration)}`);
+        }
+    } catch (checkError) {
+        actualPreAttackCheckDuration = performance.now() - preAttackCheckStart; // Renamed variable
+        console.error(`Error during pre-attack opponent check: ${checkError.message}. Aborting kick. Pre-attack check took: ${formatTiming(actualPreAttackCheckDuration)}`);
+        opponentStillPresent = false; // Ensure attack is aborted
     }
+    // --- END ADDED CHECK ---
+    // --- Update EMA for PreAttackCheck ---
+    // Update average regardless of whether opponent was present, as the check was performed
+    mlModel.updatePreAttackCheckDuration(actualPreAttackCheckDuration);
+    // --- End Update ---
+
+
+    // Execute the kick (imprison) only if opponent is still present
+    let success = false;
+    const imprisonStartTime = performance.now();
+    let actualImprisonDuration = 0; // Renamed variable
+
+    if (opponentStillPresent) { // <-- Check the flag here
+        try {
+            // Note: searchAndClick already happened in mainLoop.
+            // We just need to execute the imprison logic now.
+            await imprison(); // Assumes imprison() handles the final steps after rival is clicked
+            success = true;
+            actualImprisonDuration = performance.now() - imprisonStartTime; // Renamed variable
+            console.log(`Successful kick executed. Imprison action took: ${formatTiming(actualImprisonDuration)}`);
+            // --- Update EMA for Imprison (only on success/attempt) ---
+            mlModel.updateImprisonDuration(actualImprisonDuration);
+            // --- End Update ---
+        } catch (imprisonError) {
+            success = false; // Ensure success is false on error
+            actualImprisonDuration = performance.now() - imprisonStartTime; // Renamed variable
+            console.error(`Failed kick attempt. Error: ${imprisonError.message}. Imprison action took: ${formatTiming(actualImprisonDuration)}`);
+            // Optionally update EMA even on failure, depending on desired behavior
+            // mlModel.updateImprisonDuration(actualImprisonDuration);
+            // Decide if you want to re-throw the error or just log it and continue the main loop
+        }
+    } else {
+        // If opponent wasn't present, the attack was effectively aborted/failed before imprison started
+        success = false;
+        actualImprisonDuration = 0; // Imprison action didn't run
+        console.log("Kick aborted as opponent was not present before final action.");
+        // Attempt to close any potentially open dialog
+        try {
+            console.log("Attempting to click close button as a cleanup...");
+            await actions.click('.dialog__close-button > img'); 
+        } catch (closeError) {
+            // Log if close fails, but don't stop the process
+            console.warn(`Cleanup click on close button failed (likely not present): ${closeError.message}`);
+        }
+        // Do NOT update imprison EMA here as the action wasn't attempted
+    }
+
+    // --- REVISED finally logic (no finally block needed here) ---
+    // Calculate total time from critical check start to end of imprison attempt (or abortion)
+    // timeBeforeSleep already includes initial checks + the click time
+    const totalExecutionTime = timeBeforeSleep + actualSleepDuration + actualPreAttackCheckDuration + actualImprisonDuration;
+    // actualKickMoment is time from initial check start to *start* of imprison
+    const actualKickMoment = timeBeforeSleep + actualSleepDuration + actualPreAttackCheckDuration;
+
+    // Record the result using the *original* predicted timing bin that was targeted
+    mlModel.recordResult(originalPredictedTiming, success, totalExecutionTime);
+
+    // Save the model state (including updated EMAs) after recording result
+    mlModel.saveModel(); // Ensure EMAs are saved
+
+    console.log(`--- Attack Sequence Summary ---`);
+    console.log(`Target Kick Time (Predicted): ${originalPredictedTiming}ms`);
+    console.log(`Time Before Sleep (Checks+Click): ${formatTiming(timeBeforeSleep)}`); // Updated log label
+    console.log(`Calculated Sleep:             ${formatTiming(adjustedSleepDuration)}`);
+    console.log(`Actual Sleep:                 ${formatTiming(actualSleepDuration)}`);
+    console.log(`Pre-Attack Check Duration:    ${formatTiming(actualPreAttackCheckDuration)}`);
+    console.log(`Imprison Action Duration:     ${formatTiming(actualImprisonDuration)}`);
+    console.log(`---------------------------------`);
+    console.log(`Total Execution Time:         ${formatTiming(totalExecutionTime)}`);
+    console.log(`Actual Kick Moment Offset:    ${formatTiming(actualKickMoment)} (Time from initial check start to imprison start)`);
+    console.log(`Result for Target ${originalPredictedTiming}ms: ${success ? 'Success' : 'Failure'}`);
+    console.log(`--- End Summary ---`);
 }
 async function initialConnection() {
     try {

@@ -3,7 +3,7 @@ const puppeteer = require('puppeteer');
 const axios = require('axios');
 
 const PORT = 8080;
-const TIMEOUT = 3000;
+const TIMEOUT = 6000; // Increased timeout from 3000ms to 6000ms
 const SCROLL_POSITION = 288452.8229064941406;
 const processedQueries = new Set();
 const wss = new WebSocket.Server({ port: PORT });
@@ -115,7 +115,25 @@ async function getMistralResponse(userQuery) {
       },
     });
 
-    return response.data.choices[0].message.content; // Extract the response content
+    let rawResponse = response.data.choices[0].message.content.trim();
+
+    // --- Truncate the response ---
+    const lines = rawResponse.split('\n');
+    let truncatedResponse;
+    if (lines.length >= 2) {
+      truncatedResponse = lines.slice(0, 2).join('\n'); // Take first two lines
+    } else {
+      truncatedResponse = rawResponse; // Use the single line if less than 2
+    }
+
+    // Further truncate if still too long (e.g., > 100 chars)
+    if (truncatedResponse.length > 100) {
+      truncatedResponse = truncatedResponse.substring(0, 100) + '...';
+    }
+    // --- End Truncation ---
+
+    return truncatedResponse;
+
   } catch (error) {
     console.error('Error fetching response from Mistral:', error);
     return 'Sorry, I could not process your request.';
@@ -151,9 +169,6 @@ const actions = {
 	
   async runAiChat({ username }) {
 
-  // Wait for the chat message content to be available
-  await page.waitForSelector('.channel-message__content__text');
-
   // Function to send a message in the input field
   async function sendMessage(response) {
     const inputSelector = '#channel-new-message__text-field-input';
@@ -165,6 +180,9 @@ const actions = {
   // Set an interval to keep checking for new messages
   const checkNewMessages = async () => {
     try {
+      // Wait for the chat message container before querying
+      await page.waitForSelector('.channel-message__content__text', { timeout: 2000 }); // Wait up to 2s each time
+
       // Evaluate the current state of the chat feed
       const messages = await page.evaluate(() => {
         const messageElements = document.querySelectorAll('.channel-message__content__text div');
@@ -243,12 +261,15 @@ const actions = {
         }
         if (contentElement) {
           contentElement.click();
-          this.reloadPage();
+          this.reloadPage(); // Problematic line back inside evaluate
         } else {
           throw new Error('Element not found');
         }
       }, frameIndex, selectorType, selector);
-      return { status: 'success', action: 'switchToDefaultFrame', message: "Successfully clicked" };
+      // Restore original return, but correct the action name
+      return { status: 'success', action: 'switchToFramePlanet', message: "Successfully clicked" };
+    } else {
+       return { status: 'error', action: 'switchToFramePlanet', message: 'Frame index out of range' };
     }
   },
 
@@ -345,33 +366,99 @@ async searchAndClick({ rivals }) {
       throw new Error('rivals must be an array');
     }
 
-    let result = await Promise.race([
-      page.evaluate((selector, rivalsArray) => {
-        const elements = document.querySelectorAll(selector);
-        for (const element of elements) {
-          const matchedRival = rivalsArray.find(rival => element.textContent.trim() === rival.trim());
-          if (matchedRival) {
-            element.click();
-            return { found: true, rival: matchedRival };
-          }
-        }
-        return { found: false };
-      }, 'li', rivals),
-      sleep(TIMEOUT).then(() => ({ found: false }))
-    ]);
+    const rivalSelector = 'li'; // Selector for the list items containing rival names
+    const closeButtonSelector = '.dialog__close-button > img';
+    let foundRival = null;
+    let clickedRival = false;
+    let clickedClose = false;
+    let rivalName = "dummyvalue"; // Default value
+    let handle = null; // To store the element handle
 
-    if (!result.found) {
-      await page.click('.dialog__close-button > img');
+    try {
+      // Loop through configured rivals to find the specific element just before clicking
+      for (const rival of rivals) {
+        const rivalXPath = `//li[contains(., '${rival.trim()}')]`;
+        try {
+          // Use waitForXPath to get a handle to the specific rival li, short timeout
+          handle = await page.waitForXPath(rivalXPath, { timeout: 500, visible: true }); // Wait for visible element
+          if (handle) {
+            console.log(`Found handle for rival: ${rival}`);
+            rivalName = rival; // Store the name we found the handle for
+            // Attempt to click this specific handle
+            try {
+              await handle.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' }));
+              await page.waitForTimeout(100); // Slightly longer pause after scroll
+              await handle.click();
+              console.log(`Clicked rival element handle: ${rivalName}`);
+              clickedRival = true;
+            } catch (clickError) {
+              console.error(`Error clicking rival element handle for ${rivalName}: ${clickError.message}`);
+              clickedRival = false; // Ensure flag is false if click fails
+            } finally {
+               if (handle) await handle.dispose(); // Dispose handle regardless of click success/failure
+            }
+            // If click was successful, break the loop
+            if (clickedRival) {
+                break;
+            }
+          }
+        } catch (waitError) {
+          // waitForXPath timed out or failed for this specific rival, continue to next
+          // console.log(`waitForXPath failed for ${rival}: ${waitError.message}`);
+           if (handle) await handle.dispose(); // Ensure handle is disposed if wait fails
+           handle = null; // Reset handle
+        }
+      } // End of rival loop
+
+      // If loop finished and no rival was clicked, try clicking the close button
+      if (!clickedRival) {
+        console.log("No rival found/clicked, attempting to click close button.");
+        try {
+          await page.click(closeButtonSelector, { timeout: 1000 }); // Shorter timeout for close
+          clickedClose = true;
+          console.log("Clicked close button.");
+        } catch (closeError) {
+          console.warn(`Could not click close button: ${closeError.message}`);
+          clickedClose = false;
+        }
+      }
+    } catch (error) {
+      // Handle errors like timeout waiting for selector
+      console.error(`Error in searchAndClick: ${error.message}`);
+      // Attempt to click close button as a last resort if timeout occurred
+      if (error.name === 'TimeoutError') {
+          console.warn(`Timeout waiting for rival list ('${rivalSelector}'). Attempting fallback close click.`);
+          try {
+              await page.click(closeButtonSelector, { timeout: 1000 });
+              clickedClose = true;
+              console.log("Clicked close button via fallback after timeout.");
+          } catch (fallbackError) {
+              console.error(`Fallback close click failed: ${fallbackError.message}`);
+          }
+      }
+      // Ensure clickedRival is false if any error occurred before click attempt
+      clickedRival = false;
+    }
+
+    // Construct response message
+    let message;
+    if (clickedRival) {
+      message = `Found and clicked exact matching element for rival: ${rivalName}`;
+    } else if (clickedClose) {
+      message = 'No exact match found for rival or click failed, clicked close button.';
+    } else {
+      message = 'No exact match found for rival, and close button click failed or was not possible.';
     }
 
     return {
       status: 'success',
       action: 'searchAndClick',
-      message: result.found ? `Found and clicked exact matching element for rival: ${result.rival}` : 'No exact match found, clicked alternative button',
-      flag: result.found,
-      matchedRival: result.rival || "dummyvalue"
+      message: message,
+      flag: clickedRival, // Flag indicates if rival was successfully clicked
+      matchedRival: rivalName // Return the name of the rival if clicked, otherwise "dummyvalue"
     };
   },
+
   async scroll({ selector }) {
     await page.waitForSelector(selector, { timeout: TIMEOUT });
     await page.evaluate((sel, pos) => {
@@ -437,6 +524,19 @@ async searchAndClick({ rivals }) {
     }
     return { status: 'success', action: 'xpath', selector: xpath };
   },
+
+  // *** NEW ACTION: Waits for XPath without clicking ***
+  async waitForXPath({ xpath }) {
+    try {
+      // Use Puppeteer's built-in waitForXPath
+      await page.waitForXPath(xpath, { timeout: TIMEOUT }); // Use the standard TIMEOUT
+      return { status: 'success', action: 'waitForXPath', selector: xpath, message: 'XPath element found' };
+    } catch (error) {
+      // Throw an error if the element is not found within the timeout
+      throw new Error(`Element for XPath not found within timeout: ${xpath} - ${error.message}`);
+    }
+  },
+  // *** END NEW ACTION ***
 
   async sleep({ ms }) {
     await sleep(ms);
