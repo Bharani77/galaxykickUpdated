@@ -1,21 +1,45 @@
 const WebSocket = require('ws');
 const puppeteer = require('puppeteer');
 const axios = require('axios');
+const fs = require('fs'); // Added fs module
 
 const PORT = 8080;
-const TIMEOUT = 6000; // Increased timeout from 3000ms to 6000ms
+const TIMEOUT = 1000; // Increased timeout from 3000ms to 6000ms
 const SCROLL_POSITION = 288452.8229064941406;
 const processedQueries = new Set();
 const wss = new WebSocket.Server({ port: PORT });
+// const client = ""; // Removed conflicting declaration
+
+// const TARGET_UID = '57292266'; // No longer needed
+let activeWs = null; // Keep track of the active WebSocket connection
+let configRivals = []; // To store rival names from config
+const RIVAL_DETECTION_COOLDOWN_MS = 5000; // Cooldown period in milliseconds
+
+// Load rivals from config file
+try {
+    const configData = fs.readFileSync('config1.json', 'utf8');
+    const loadedConfig = JSON.parse(configData);
+    if (Array.isArray(loadedConfig.rival)) {
+        configRivals = loadedConfig.rival.map(r => r.trim()).filter(r => r); // Trim and filter empty strings
+    } else if (typeof loadedConfig.rival === 'string' && loadedConfig.rival.trim()) {
+        configRivals = [loadedConfig.rival.trim()];
+    }
+    console.log('Loaded rivals:', configRivals);
+} catch (err) {
+    console.error('Error reading or parsing config1.json for rivals:', err);
+    // Proceed with empty rivals list or handle error as needed
+}
+
 
 let browser;
 let page;
+let client; // Make client accessible in configurePage scope
 
 async function setupBrowser() {
   console.log('Launching browser...');
   try {
     /*browser = await puppeteer.launch({
-      headless: true,
+      headless: false,
       defaultViewport: null,
       args: [
         '--no-sandbox',
@@ -48,15 +72,16 @@ async function setupBrowser() {
     page = await browser.newPage();
     console.log('New page created');
 
-    await configurePage();
-    await navigateToGalaxy();
-    await injectCSS();
+  await configurePage(client); // Pass client to configurePage
+  await navigateToGalaxy();
+  await injectCSS();
   } catch (error) {
     console.error('Error setting up browser:', error);
   }
 }
 
-async function configurePage() {
+// Accept client session as argument
+async function configurePage(client) {
   const maxViewport = await page.evaluate(() => ({
     width: window.screen.availWidth,
     height: window.screen.availHeight,
@@ -69,24 +94,134 @@ async function configurePage() {
     }
   });
 
-  const client = await page.target().createCDPSession();
-  await Promise.all([
-    client.send('Network.enable'),
-    client.send('Network.emulateNetworkConditions', {
-      offline: false,
-      latency: 0,
-      downloadThroughput: 100 * 1024 * 1024 / 8,
-      uploadThroughput: 100 * 1024 * 1024 / 8,
-    }),
-    client.send('Emulation.setCPUThrottlingRate', { rate: 1 }),
-  ]);
+  // Expose a function to the page context for signaling back to Node.js
+  await page.exposeFunction('onRivalDetect', (rivalName) => {
+    console.log(`[Exposed Fn] Detected rival "${rivalName}" via injected script.`);
+    if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+      try {
+        activeWs.send(JSON.stringify({ action: 'rivalDetected', rivalName: rivalName }));
+        console.log(`[Exposed Fn] Sent rivalDetected signal for: ${rivalName}`);
+      } catch (sendError) {
+        console.error(`[Exposed Fn] Error sending rivalDetected signal: ${sendError.message}`);
+      }
+    } else {
+      console.warn(`[Exposed Fn] Rival "${rivalName}" detected, but no active local WebSocket connection.`);
+    }
+  });
 
+  // Inject script to override WebSocket and listen for messages
+  // This runs in the browser context *before* the page's scripts
+  const TARGET_WEBSOCKET_URL = 'wss://cs.mobstudio.ru:6672'; // Define the target URL constant
+  await page.evaluateOnNewDocument((rivalsToWatch, targetUrl) => {
+    const TARGET_COMMANDS = ['JOIN', '353']; // Commands to check within messages
+
+    // Helper function to escape regex special characters
+    function escapeRegExp(string) {
+        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+    }
+
+    // Store original WebSocket
+    const NativeWebSocket = window.WebSocket;
+
+    // Override WebSocket constructor
+    window.WebSocket = function(url, protocols) {
+      console.log('[WS Override] Attempting to connect to:', url);
+      const socket = new NativeWebSocket(url, protocols); // Create the actual WebSocket
+
+      // Check if this is the target WebSocket URL
+      if (url === targetUrl) {
+        console.log('[WS Override] Intercepting target WebSocket:', url);
+
+        socket.addEventListener('message', async (event) => {
+          let messageData;
+          try {
+            // Process message data (handle Blob, ArrayBuffer, string)
+            if (event.data instanceof Blob) {
+              messageData = await event.data.text();
+            } else if (event.data instanceof ArrayBuffer) {
+              messageData = new TextDecoder().decode(event.data);
+            } else {
+              messageData = event.data;
+            }
+
+            // Check if message contains target commands
+            const hasCommand = TARGET_COMMANDS.some(cmd => messageData.includes(cmd));
+            if (!hasCommand) {
+              return; // Ignore messages without JOIN or 353
+            }
+
+            // Check for each rival
+            for (const rival of rivalsToWatch) {
+              // Create regex similar to Tampermonkey script to find rival, possibly prefixed with '+'
+              const rivalRegex = new RegExp(`(\\+?${escapeRegExp(rival)})`);
+              const match = messageData.match(rivalRegex);
+
+              if (match) {
+                const detectedName = rival; // The name from our list that was found
+                console.log(`[WS Override] RIVAL "${detectedName}" DETECTED in message!`, messageData);
+                // Call the exposed function to signal Node.js
+                window.onRivalDetect(detectedName);
+                // Optional: break if you only need to detect one rival per message
+                // break;
+              }
+            }
+          } catch (e) {
+            console.error('[WS Override] Error processing message:', e, event.data);
+          }
+        });
+
+        socket.addEventListener('open', () => {
+            console.log('[WS Override] Target WebSocket opened:', url);
+        });
+        socket.addEventListener('close', () => {
+            console.log('[WS Override] Target WebSocket closed:', url);
+        });
+        socket.addEventListener('error', (err) => {
+            console.error('[WS Override] Target WebSocket error:', url, err);
+        });
+      }
+
+      // Return the original/native WebSocket instance
+      return socket;
+    };
+
+    // Ensure the override looks like the native one
+    window.WebSocket.prototype = NativeWebSocket.prototype;
+    window.WebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+    window.WebSocket.OPEN = NativeWebSocket.OPEN;
+    window.WebSocket.CLOSING = NativeWebSocket.CLOSING;
+    window.WebSocket.CLOSED = NativeWebSocket.CLOSED;
+
+  }, configRivals, TARGET_WEBSOCKET_URL); // Pass rivals and target URL to the injected script
+
+
+  // --- CDP Client Setup (Optional - can be removed if not needed for other things) ---
+  // client = await page.target().createCDPSession(); // Keep if needed elsewhere
+  // await Promise.all([
+  //   // client.send('Network.enable'), // Keep if needed elsewhere
+  //   client.send('Network.emulateNetworkConditions', { // Keep if needed
+  //     offline: false,
+  //     latency: 0,
+  //     downloadThroughput: 100 * 1024 * 1024 / 8,
+  //     uploadThroughput: 100 * 1024 * 1024 / 8,
+  //   }),
+  //   client.send('Emulation.setCPUThrottlingRate', { rate: 1 }), // Keep if needed
+  // ]);
+  // --- End CDP Client Setup ---
+
+
+  // --- Network Interception (Keep for blocking resources) ---
   await page.setRequestInterception(true);
   page.on('request', (request) => {
-    ['font', 'image', 'media'].includes(request.resourceType())
-      ? request.abort()
-      : request.continue();
+    // Keep existing request interception logic (abort specific resource types)
+    if (['font', 'image', 'media'].includes(request.resourceType())) {
+      request.abort();
+    } else {
+       // Allow all other requests (including the one with TARGET_UID) to proceed
+       request.continue();
+    }
   });
+
 
   await page.setCacheEnabled(true);
 }
@@ -261,13 +396,17 @@ const actions = {
         }
         if (contentElement) {
           contentElement.click();
-          this.reloadPage(); // Problematic line back inside evaluate
+          // Reload logic moved outside evaluate
         } else {
           throw new Error('Element not found');
         }
       }, frameIndex, selectorType, selector);
+
+      // Reload the page after clicking the element in the frame
+      await this.reloadPage(); // Call reloadPage from Node.js context
+
       // Restore original return, but correct the action name
-      return { status: 'success', action: 'switchToFramePlanet', message: "Successfully clicked" };
+      return { status: 'success', action: 'switchToFramePlanet', message: "Successfully clicked and reloaded" };
     } else {
        return { status: 'error', action: 'switchToFramePlanet', message: 'Frame index out of range' };
     }
@@ -366,98 +505,34 @@ async searchAndClick({ rivals }) {
       throw new Error('rivals must be an array');
     }
 
-    const rivalSelector = 'li'; // Selector for the list items containing rival names
-    const closeButtonSelector = '.dialog__close-button > img';
-    let foundRival = null;
-    let clickedRival = false;
-    let clickedClose = false;
-    let rivalName = "dummyvalue"; // Default value
-    let handle = null; // To store the element handle
-
-    try {
-      // Loop through configured rivals to find the specific element just before clicking
-      for (const rival of rivals) {
-        const rivalXPath = `//li[contains(., '${rival.trim()}')]`;
-        try {
-          // Use waitForXPath to get a handle to the specific rival li, short timeout
-          handle = await page.waitForXPath(rivalXPath, { timeout: 500, visible: true }); // Wait for visible element
-          if (handle) {
-            console.log(`Found handle for rival: ${rival}`);
-            rivalName = rival; // Store the name we found the handle for
-            // Attempt to click this specific handle
-            try {
-              await handle.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center' }));
-              await page.waitForTimeout(100); // Slightly longer pause after scroll
-              await handle.click();
-              console.log(`Clicked rival element handle: ${rivalName}`);
-              clickedRival = true;
-            } catch (clickError) {
-              console.error(`Error clicking rival element handle for ${rivalName}: ${clickError.message}`);
-              clickedRival = false; // Ensure flag is false if click fails
-            } finally {
-               if (handle) await handle.dispose(); // Dispose handle regardless of click success/failure
-            }
-            // If click was successful, break the loop
-            if (clickedRival) {
-                break;
-            }
+    let result = await Promise.race([
+      page.evaluate((selector, rivalsArray) => {
+        const elements = document.querySelectorAll(selector);
+        for (const element of elements) {
+          const matchedRival = rivalsArray.find(rival => element.textContent.trim() === rival.trim());
+          if (matchedRival) {
+            element.click();
+            return { found: true, rival: matchedRival };
           }
-        } catch (waitError) {
-          // waitForXPath timed out or failed for this specific rival, continue to next
-          // console.log(`waitForXPath failed for ${rival}: ${waitError.message}`);
-           if (handle) await handle.dispose(); // Ensure handle is disposed if wait fails
-           handle = null; // Reset handle
         }
-      } // End of rival loop
+        return { found: false };
+      }, 'li', rivals),
+      sleep(TIMEOUT).then(() => ({ found: false }))
+    ]);
 
-      // If loop finished and no rival was clicked, try clicking the close button
-      if (!clickedRival) {
-        console.log("No rival found/clicked, attempting to click close button.");
-        try {
-          await page.click(closeButtonSelector, { timeout: 1000 }); // Shorter timeout for close
-          clickedClose = true;
-          console.log("Clicked close button.");
-        } catch (closeError) {
-          console.warn(`Could not click close button: ${closeError.message}`);
-          clickedClose = false;
-        }
-      }
-    } catch (error) {
-      // Handle errors like timeout waiting for selector
-      console.error(`Error in searchAndClick: ${error.message}`);
-      // Attempt to click close button as a last resort if timeout occurred
-      if (error.name === 'TimeoutError') {
-          console.warn(`Timeout waiting for rival list ('${rivalSelector}'). Attempting fallback close click.`);
-          try {
-              await page.click(closeButtonSelector, { timeout: 1000 });
-              clickedClose = true;
-              console.log("Clicked close button via fallback after timeout.");
-          } catch (fallbackError) {
-              console.error(`Fallback close click failed: ${fallbackError.message}`);
-          }
-      }
-      // Ensure clickedRival is false if any error occurred before click attempt
-      clickedRival = false;
-    }
-
-    // Construct response message
-    let message;
-    if (clickedRival) {
-      message = `Found and clicked exact matching element for rival: ${rivalName}`;
-    } else if (clickedClose) {
-      message = 'No exact match found for rival or click failed, clicked close button.';
-    } else {
-      message = 'No exact match found for rival, and close button click failed or was not possible.';
+    if (!result.found) {
+      await page.click('.dialog__close-button > img');
     }
 
     return {
       status: 'success',
       action: 'searchAndClick',
-      message: message,
-      flag: clickedRival, // Flag indicates if rival was successfully clicked
-      matchedRival: rivalName // Return the name of the rival if clicked, otherwise "dummyvalue"
+      message: result.found ? `Found and clicked exact matching element for rival: ${result.rival}` : 'No exact match found, clicked alternative button',
+      flag: result.found,
+      matchedRival: result.rival || "dummyvalue"
     };
   },
+
 
   async scroll({ selector }) {
     await page.waitForSelector(selector, { timeout: TIMEOUT });
@@ -552,6 +627,9 @@ async searchAndClick({ rivals }) {
     for (const action of actions) {
       console.log("Performing action:", action);
       switch (action.type) {
+        case 'sleep':
+          await sleep(action.duration);
+          break;
         case 'click':
           await page.waitForSelector(action.selector, { timeout: TIMEOUT });
           await page.click(action.selector);
@@ -628,6 +706,7 @@ async searchAndClick({ rivals }) {
 
 wss.on('connection', function connection(ws) {
   console.log('Client connected');
+  activeWs = ws; // Store the latest connection
 
   ws.on('message', async function incoming(message) {
     console.log('Received:', message.toString());
@@ -654,7 +733,19 @@ wss.on('connection', function connection(ws) {
     }
   });
 
-  ws.on('close', () => console.log('Client disconnected'));
+  ws.on('close', () => {
+    console.log('Client disconnected');
+    if (activeWs === ws) {
+      activeWs = null; // Clear activeWs if this connection closes
+    }
+  });
+
+  ws.on('error', (error) => {
+     console.error('WebSocket error:', error);
+     if (activeWs === ws) {
+       activeWs = null; // Clear on error too
+     }
+  });
 });
 
 console.log(`WebSocket server started on port ${PORT}`);
