@@ -1,50 +1,38 @@
 const WebSocket = require('ws');
 const puppeteer = require('puppeteer');
 const axios = require('axios');
-const fs = require('fs'); // Added fs module
+const fs = require('fs');
 
 const PORT = 8080;
-const TIMEOUT = 1000; // Increased timeout from 3000ms to 6000ms
+const TIMEOUT = 1000;
 const SCROLL_POSITION = 288452.8229064941406;
 const processedQueries = new Set();
 const wss = new WebSocket.Server({ port: PORT });
-// const client = ""; // Removed conflicting declaration
-
-// const TARGET_UID = '57292266'; // No longer needed
-let activeWs = null; // Keep track of the active WebSocket connection
-let configRivals = []; // To store rival names from config
-const RIVAL_DETECTION_COOLDOWN_MS = 5000; // Cooldown period in milliseconds
+let activeWs = null;
+let configRivals = [];
+const RIVAL_DETECTION_COOLDOWN_MS = 5000;
 
 // Load rivals from config file
 try {
     const configData = fs.readFileSync('config1.json', 'utf8');
     const loadedConfig = JSON.parse(configData);
     if (Array.isArray(loadedConfig.rival)) {
-        configRivals = loadedConfig.rival.map(r => r.trim()).filter(r => r); // Trim and filter empty strings
+        configRivals = loadedConfig.rival.map(r => r.trim()).filter(r => r);
     } else if (typeof loadedConfig.rival === 'string' && loadedConfig.rival.trim()) {
         configRivals = [loadedConfig.rival.trim()];
     }
     console.log('Loaded rivals:', configRivals);
 } catch (err) {
     console.error('Error reading or parsing config1.json for rivals:', err);
-    // Proceed with empty rivals list or handle error as needed
 }
-
 
 let browser;
 let page;
-let client; // Make client accessible in configurePage scope
+let client;
 
 async function setupBrowser() {
   console.log('Launching browser...');
   try {
-    /*browser = await puppeteer.launch({
-      headless: false,
-      defaultViewport: null,
-      args: [
-        '--no-sandbox',
-      ]
-    });*/
     browser = await puppeteer.launch({
       headless: "new",
       defaultViewport: null,
@@ -72,14 +60,13 @@ async function setupBrowser() {
     page = await browser.newPage();
     console.log('New page created');
 
-  await configurePage(client); // Pass client to configurePage
-  await navigateToGalaxy();
-  await injectCSS();
+    await configurePage(client);
+    await navigateToGalaxy();
+    await injectCSS();
   } catch (error) {
     console.error('Error setting up browser:', error);
   }
 }
-
 // Accept client session as argument
 async function configurePage(client) {
   const maxViewport = await page.evaluate(() => ({
@@ -94,13 +81,21 @@ async function configurePage(client) {
     }
   });
 
-  // Expose a function to the page context for signaling back to Node.js
-  await page.exposeFunction('onRivalDetect', (rivalName) => {
-    console.log(`[Exposed Fn] Detected rival "${rivalName}" via injected script.`);
+  // Expose a function to the page context for signaling back to Node.js with precise timing
+  await page.exposeFunction('onRivalDetect', (rivalName, detectedTimestamp) => {
+    // Use the timestamp from the browser context or create one if not provided
+    const detectionTime = detectedTimestamp || Date.now();
+    
+    console.log(`[Exposed Fn] Detected rival "${rivalName}" via injected script at ${new Date(detectionTime).toISOString()} (${detectionTime}ms)`);
+    
     if (activeWs && activeWs.readyState === WebSocket.OPEN) {
       try {
-        activeWs.send(JSON.stringify({ action: 'rivalDetected', rivalName: rivalName }));
-        console.log(`[Exposed Fn] Sent rivalDetected signal for: ${rivalName}`);
+        activeWs.send(JSON.stringify({ 
+          action: 'rivalDetected', 
+          rivalName: rivalName, 
+          timestamp: detectionTime 
+        }));
+        console.log(`[Exposed Fn] Sent rivalDetected signal for: ${rivalName} with timestamp: ${detectionTime}ms`);
       } catch (sendError) {
         console.error(`[Exposed Fn] Error sending rivalDetected signal: ${sendError.message}`);
       }
@@ -109,26 +104,34 @@ async function configurePage(client) {
     }
   });
 
-  // Inject script to override WebSocket and listen for messages
-  // This runs in the browser context *before* the page's scripts
-  const TARGET_WEBSOCKET_URL = 'wss://cs.mobstudio.ru:6672'; // Define the target URL constant
+  // Enhanced WebSocket override with precise timestamp
+  const TARGET_WEBSOCKET_URL = 'wss://cs.mobstudio.ru:6672';
   await page.evaluateOnNewDocument((rivalsToWatch, targetUrl) => {
-    const TARGET_COMMANDS = ['JOIN', '353']; // Commands to check within messages
+    const TARGET_COMMANDS = ['JOIN', '353'];
 
-    // Helper function to escape regex special characters
     function escapeRegExp(string) {
-        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
-    // Store original WebSocket
+    // Format time like the Tampermonkey script but keep ms value separate
+    function getCurrentTimeFormatted() {
+        const now = new Date();
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        const seconds = String(now.getSeconds()).padStart(2, '0');
+        const milliseconds = String(now.getMilliseconds()).padStart(3, '0');
+        return {
+            formatted: `${hours}:${minutes}:${seconds}.${milliseconds}`,
+            timestamp: now.getTime() // Return exact timestamp in ms
+        };
+    }
+
     const NativeWebSocket = window.WebSocket;
 
-    // Override WebSocket constructor
     window.WebSocket = function(url, protocols) {
       console.log('[WS Override] Attempting to connect to:', url);
-      const socket = new NativeWebSocket(url, protocols); // Create the actual WebSocket
+      const socket = new NativeWebSocket(url, protocols);
 
-      // Check if this is the target WebSocket URL
       if (url === targetUrl) {
         console.log('[WS Override] Intercepting target WebSocket:', url);
 
@@ -150,19 +153,20 @@ async function configurePage(client) {
               return; // Ignore messages without JOIN or 353
             }
 
-            // Check for each rival
+            // Check for each rival with precise timing
             for (const rival of rivalsToWatch) {
-              // Create regex similar to Tampermonkey script to find rival, possibly prefixed with '+'
               const rivalRegex = new RegExp(`(\\+?${escapeRegExp(rival)})`);
               const match = messageData.match(rivalRegex);
 
               if (match) {
-                const detectedName = rival; // The name from our list that was found
-                console.log(`[WS Override] RIVAL "${detectedName}" DETECTED in message!`, messageData);
-                // Call the exposed function to signal Node.js
-                window.onRivalDetect(detectedName);
-                // Optional: break if you only need to detect one rival per message
-                // break;
+                // Get the EXACT timestamp when rival is detected
+                const timeInfo = getCurrentTimeFormatted();
+                const detectedName = rival;
+                
+                console.log(`[WS Override] RIVAL "${detectedName}" DETECTED at ${timeInfo.formatted}!`, messageData);
+                
+                // Call the exposed function with rivalName AND the exact timestamp in milliseconds
+                window.onRivalDetect(detectedName, timeInfo.timestamp);
               }
             }
           } catch (e) {
@@ -181,34 +185,16 @@ async function configurePage(client) {
         });
       }
 
-      // Return the original/native WebSocket instance
       return socket;
     };
 
-    // Ensure the override looks like the native one
     window.WebSocket.prototype = NativeWebSocket.prototype;
     window.WebSocket.CONNECTING = NativeWebSocket.CONNECTING;
     window.WebSocket.OPEN = NativeWebSocket.OPEN;
     window.WebSocket.CLOSING = NativeWebSocket.CLOSING;
     window.WebSocket.CLOSED = NativeWebSocket.CLOSED;
 
-  }, configRivals, TARGET_WEBSOCKET_URL); // Pass rivals and target URL to the injected script
-
-
-  // --- CDP Client Setup (Optional - can be removed if not needed for other things) ---
-  // client = await page.target().createCDPSession(); // Keep if needed elsewhere
-  // await Promise.all([
-  //   // client.send('Network.enable'), // Keep if needed elsewhere
-  //   client.send('Network.emulateNetworkConditions', { // Keep if needed
-  //     offline: false,
-  //     latency: 0,
-  //     downloadThroughput: 100 * 1024 * 1024 / 8,
-  //     uploadThroughput: 100 * 1024 * 1024 / 8,
-  //   }),
-  //   client.send('Emulation.setCPUThrottlingRate', { rate: 1 }), // Keep if needed
-  // ]);
-  // --- End CDP Client Setup ---
-
+  }, configRivals, TARGET_WEBSOCKET_URL);
 
   // --- Network Interception (Keep for blocking resources) ---
   await page.setRequestInterception(true);

@@ -6,6 +6,7 @@ import time
 import signal
 from flask_cors import CORS
 import pathlib
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -108,18 +109,47 @@ def stop_galaxy(form_number):
             test_processes[form_number].kill()
         test_processes[form_number] = None
     
-    # Execute killNode.sh
+    # Execute killNode.sh but suppress PM2 not found errors
     kill_script_path = os.path.join(GALAXY_BACKEND_PATH, f'killNode_{form_number}.sh')
     if os.path.exists(kill_script_path):
         try:
-            subprocess.run(['bash', kill_script_path], check=True, cwd=GALAXY_BACKEND_PATH)
+            # Run the kill script but capture output to filter errors
+            process = subprocess.Popen(
+                ['bash', kill_script_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=GALAXY_BACKEND_PATH,
+                text=True
+            )
+            stdout, stderr = process.communicate()
+            
+            # Filter out PM2 "not found" errors from the output
+            filtered_stderr = []
+            for line in stderr.splitlines():
+                if not re.search(r'\[PM2\]\[ERROR\]\s+Process or Namespace .* not found', line):
+                    filtered_stderr.append(line)
+            
+            # If there are real errors after filtering, report them
+            if filtered_stderr:
+                return jsonify({
+                    "message": f"Galaxy_{form_number}.js and Test_{form_number}.js stopped, but with warnings",
+                    "warnings": "\n".join(filtered_stderr),
+                    "killed_galaxy_pid": galaxy_pid,
+                    "killed_test_pid": test_pid
+                }), 200
+            else:
+                return jsonify({
+                    "message": f"Galaxy_{form_number}.js and Test_{form_number}.js stopped successfully",
+                    "killed_galaxy_pid": galaxy_pid,
+                    "killed_test_pid": test_pid
+                }), 200
+                
+        except Exception as e:
             return jsonify({
-                "message": f"Galaxy_{form_number}.js and Test_{form_number}.js stopped successfully",
+                "message": f"Error executing killNode_{form_number}.sh, but processes terminated manually: {str(e)}",
                 "killed_galaxy_pid": galaxy_pid,
                 "killed_test_pid": test_pid
             }), 200
-        except subprocess.CalledProcessError as e:
-            return jsonify({"message": f"Error executing killNode_{form_number}.sh: {str(e)}"}), 500
     else:
         return jsonify({
             "message": f"Kill script not found, but processes terminated manually",
@@ -161,10 +191,21 @@ def cleanup():
                 if test_processes[form_number]:
                     test_processes[form_number].kill()
         
-        # Execute killNode.sh during cleanup as well
+        # Execute killNode.sh during cleanup but suppress PM2 not found errors
         kill_script_path = os.path.join(GALAXY_BACKEND_PATH, f'killNode_{form_number}.sh')
         if os.path.exists(kill_script_path):
-            subprocess.run(['bash', kill_script_path], check=False, cwd=GALAXY_BACKEND_PATH)
+            try:
+                # Use DEVNULL to suppress output when we don't need to see it
+                subprocess.run(
+                    ['bash', kill_script_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    cwd=GALAXY_BACKEND_PATH
+                )
+            except Exception:
+                # Just ignore any errors during cleanup
+                pass
 
 if __name__ == '__main__':
     # Register cleanup function to be called on exit

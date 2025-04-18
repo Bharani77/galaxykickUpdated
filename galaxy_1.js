@@ -1,8 +1,6 @@
 const WebSocket = require('ws');
 const fs = require('fs');
 const { exec } = require('child_process');
-
-// Add these utility functions near the top of the file
 const performance = require('perf_hooks').performance;
 
 function formatTiming(ms) {
@@ -10,12 +8,13 @@ function formatTiming(ms) {
 }
 
 let socket;
+let rivalDetectedTime = 0; // Will hold the precise detection timestamp in ms
 let isReconnecting = false;
 let flag = 0;
 let count = 0;
 let tempTime1 = 0;
-let rivalDetectedViaWebSocket = false; // Flag to track if a rival was detected via external WebSocket
-let currentAttackTime = 0; // Variable to hold the dynamic attack time;
+let rivalDetectedViaWebSocket = false;
+let currentAttackTime = 0;
 
 // Remove estimated durations from static config
 let config = {
@@ -100,24 +99,35 @@ function setupWebSocket() {
             handleError(error);
         };
 
-        // --- Add WebSocket message listener for targetDetected ---
-        // This global listener handles incoming messages that aren't direct replies to sendMessage
+        // Enhanced message listener with precise timestamp handling
         socket.onmessage = function(event) {
             try {
                 const message = JSON.parse(event.data);
-                // Check if it's the rival detection signal from test_1.js
+                
+                // Process the rivalDetected signal with precise timing
                 if (message.action === 'rivalDetected') {
-                    console.log(`[WebSocket] Received rivalDetected signal for: ${message.rivalName}`);
-                    rivalDetectedViaWebSocket = true; // Set the new flag
+                    const detectedRival = message.rivalName;
+                    // Use the exact timestamp received from the WebSocket server
+                    const detectionTimestamp = message.timestamp;
+                    
+                    // Format the time for human-readable logs
+                    const detectionTime = new Date(detectionTimestamp);
+                    const timeString = detectionTime.toTimeString().split(' ')[0] + 
+                                      '.' + detectionTime.getMilliseconds().toString().padStart(3, '0');
+                    
+                    console.log(`[WebSocket] Received rivalDetected signal for: ${detectedRival}`);
+                    console.log(`[WebSocket] Detection time: ${timeString} (${detectionTimestamp}ms)`);
+                    
+                    // Store the exact timestamp for timing calculations
+                    rivalDetectedTime = detectionTimestamp;
+                    
+                    // Set the detection flag
+                    rivalDetectedViaWebSocket = true;
                 }
-                // Note: Specific replies to sendMessage are handled by the temporary
-                // messageHandler created within the sendMessage function itself.
             } catch (parseError) {
                 console.error("[WebSocket] Error parsing message:", parseError, event.data);
             }
         };
-        // --- End WebSocket message listener ---
-
     } catch(error) {
         handleError(error);
     }
@@ -339,18 +349,8 @@ async function executeRivalChecks(planetName) {
     }
 }
 
-async function imprison(kickWindowStartTime) { // <-- Add kickWindowStartTime parameter
+async function imprison() {
     try {
-        // Initial click sequence to open the events panel
-        const initialActions = [
-            { action: 'click', selector: ".planet__events" },
-            { action: 'click', selector: ".planet__events" },
-            { action: 'click', selector: ".planet__events" },
-        ];
-        for (const action of initialActions) {
-            await sendMessage(action);
-        }
-
         // First verification: Check if rival is present in the planet
         let rivalCheckResult1 = await actions.checkUsername(config.rival);
 
@@ -359,31 +359,15 @@ async function imprison(kickWindowStartTime) { // <-- Add kickWindowStartTime pa
 
             // Press Shift+C first
             await sendMessage({ action: 'pressShiftC', selector: ".planet-bar__button__action > img" });
-            // Optional small delay if needed after Shift+C before calculating time
-            // await actions.sleep(50); // Example small delay
-
-            // --- Calculate dynamic wait ---
-            const currentTime = performance.now();
-            const elapsedTime = currentTime - kickWindowStartTime;
             
-            const remainingWait = Math.max(0, 1000 - elapsedTime);
-            console.log(`Elapsed time before final kick actions: ${formatTiming(elapsedTime)}. Remaining wait needed: ${formatTiming(remainingWait)}`);
-            // --- End calculation ---
-
-            // Construct the final sequence, adding sleep if needed
-            const finalSequenceActions = [];
-            if (remainingWait > 0) {
-                finalSequenceActions.push({ type: 'sleep', duration: remainingWait });
-            }
-            finalSequenceActions.push(
+            // Execute the final sequence immediately
+            const finalSequenceActions = [
                 { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" },
-                // { type: 'click', selector: '.dialog__close-button > img'}, // Keep or remove as needed
                 { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-            );
+            ];
 
             // Send the final sequence
             await sendMessage({ action: 'performSequentialActions', actions: finalSequenceActions });
-
 
             console.log("Imprison actions completed successfully, reloading page...");
             await actions.reloadPage(); // Reload after successful imprison
@@ -401,11 +385,9 @@ async function imprison(kickWindowStartTime) { // <-- Add kickWindowStartTime pa
         } catch (reloadError) {
             console.error("Error during safe exit reload:", reloadError);
         }
-        // Re-throw the original error so executeAttackSequence knows it failed
         throw error;
     }
 }
-
 async function waitForElement(selector, maxAttempts = 5, interval = 50) {
     for (let i = 0; i < maxAttempts; i++) {
         try {
@@ -420,142 +402,115 @@ async function waitForElement(selector, maxAttempts = 5, interval = 50) {
 }
 async function mainLoop() {
     while (true) {
-        rivalDetectedViaWebSocket = false; // Reset flag at the start of each loop iteration
+        rivalDetectedViaWebSocket = false;
+        rivalDetectedTime = 0;
+        
         try {
-            // Start timing closer to the critical checks
-            await actions.waitForClickable('.planet__events'); // Ensure UI is ready
+            await actions.waitForClickable('.planet__events');
 
-            // --- Prison Check ---
-            const prisonCheckStart = performance.now();
             const isInPrison = await checkIfInPrison(config.planetName);
-            const prisonCheckDuration = performance.now() - prisonCheckStart;
-            // console.log(`Prison check took: ${formatTiming(prisonCheckDuration)}`); // Optional detailed logging
             if (isInPrison) {
                 console.log("In prison. Executing auto-release...");
                 await autoRelease();
-                // await actions.waitForClickable('.planet-bar__button__action > img'); // Wait after release
-                 continue; // Restart loop after release
+                continue;
             }
 
-            // --- Check if a RIVAL has been detected via WebSocket BEFORE starting checks ---
             if (!rivalDetectedViaWebSocket) {
                 console.log("Rival not detected via WebSocket yet. Waiting...");
-               // await actions.sleep(500); // Wait briefly before checking again
-                continue; // Skip the rest of the loop and wait for the signal
+                continue;
             }
-            console.log("Rival detected via WebSocket. Proceeding with planet/rival checks and potential attack...");
-            // --- End RIVAL Check ---
+            
+            console.log("Rival detected via WebSocket. Proceeding with planet/rival checks...");
+            console.log(`Detection timestamp: ${rivalDetectedTime} (${new Date(rivalDetectedTime).toISOString()})`);
 
-
-            // --- Critical Rival & Planet Checks ---
-            // Removed: const criticalCheckStart = performance.now();
-
-            // 1. Check Planet Name and Online Status (Minimal sleep/wait)
             let planetOk = false;
             try {
-                // Reverted back to actions.xpath as waitForClickable timed out
                 console.log(`Checking for planet: ${config.planetName}`);
                 await actions.xpath(`//span[contains(.,'${config.planetName}')]`);
                 console.log(`Checking for 'Online now'`);
                 await actions.xpath(`//span[contains(.,'Online now')]`);
-                console.log("Clicked 'Online now'. Waiting for list..."); // Log update
-                await actions.sleep(150); // *** INCREASED/ADDED: Wait longer after clicking 'Online now' for list to appear ***
+                console.log("Clicked 'Online now'. Waiting for list...");
+                await actions.sleep(150);
                 console.log("Planet and Online status confirmed via xpath.");
                 planetOk = true;
-                // Removed the sleep(150) from here, moved it after 'Online now' click.
             } catch (planetError) {
-                 console.log(`Planet/Online check failed via xpath: ${planetError.message}. Retrying next loop.`);
-                 await actions.reloadPage();
-                 continue; // Skip to next iteration
+                console.log(`Planet/Online check failed via xpath: ${planetError.message}. Retrying next loop.`);
+                await actions.reloadPage();
+                continue;
             }
 
-            // 2. Wait for and Verify Rival Presence using XPath
             let rivalPresent = false;
-            let matchedRivalName = null; // Store the name if found
-            let rivalVerificationDuration = 0;
-            if (planetOk) { // Only check if planet is correct
-                const verificationStart = performance.now();
+            let matchedRivalName = null;
+            if (planetOk) {
                 console.log("Waiting for rival presence using XPath...");
                 try {
                     let searchResult = await actions.searchAndClick(config.rival);
-					let found = searchResult.matchedRival;
-                    rivalVerificationDuration = performance.now() - verificationStart;
+                    let found = searchResult.matchedRival;
                     if (searchResult.flag && found) {
-						rivalPresent = true;
+                        rivalPresent = true;
                     } else {
-						rivalPresent = false;
-                        console.log(`No configured rivals found via waitForXPath after checking all. Duration: ${formatTiming(rivalVerificationDuration)}`);
+                        rivalPresent = false;
+                        console.log(`No configured rivals found via waitForXPath after checking all.`);
                     }
                 } catch (generalError) {
-                    // Catch any unexpected errors during the loop/wait process
-                    rivalVerificationDuration = performance.now() - verificationStart;
-                    console.error(`Error during rival XPath verification: ${generalError.message}. Duration: ${formatTiming(rivalVerificationDuration)}`);
+                    console.error(`Error during rival XPath verification: ${generalError.message}.`);
                     rivalPresent = false;
                 }
             } else {
-                 console.log("Planet check failed, skipping rival verification.");
+                console.log("Planet check failed, skipping rival verification.");
             }
 
-            // Removed critical check duration calculation and logging
+            if (rivalPresent) {
+                // Use the precise timestamp for target execution time calculation
+                const targetExecutionTime = rivalDetectedTime + currentAttackTime;
+                const currentTime = Date.now();
+                
+                const waitTimeNeeded = Math.max(0, targetExecutionTime - currentTime);
+                
+                console.log(`Rival found. Will execute attack at time: ${targetExecutionTime} (${new Date(targetExecutionTime).toISOString()})`);
+                console.log(`Current time: ${currentTime} (${new Date(currentTime).toISOString()})`);
+                console.log(`Wait needed: ${waitTimeNeeded}ms`);
 
-                // Proceed only if click was successful
-                if (rivalPresent) {
-                    // --- Use currentAttackTime directly as sleep duration ---
-                    const sleepDuration = Math.max(0, currentAttackTime); // Ensure sleep is not negative
-                    console.log(`Rival found. Using attack time for sleep: ${sleepDuration}ms`);
+                await executeAttackSequence(waitTimeNeeded);
 
-                    // Execute attack sequence - Pass only sleep duration
-                    await executeAttackSequence(sleepDuration);
-
-                    // --- Increment/Reset currentAttackTime AFTER attack attempt ---
-                    currentAttackTime += config.interval;
-                    console.log(`Incremented attack time by ${config.interval}ms. New time: ${currentAttackTime}ms`);
-                    if (currentAttackTime > config.DefenceTime) {
-                        currentAttackTime = config.AttackTime; // Reset to base attack time
-                        console.log(`Attack time exceeded defense time. Resetting to base: ${currentAttackTime}ms`);
-                    }
-                    // --- End Increment/Reset ---
-
+                currentAttackTime += config.interval;
+                console.log(`Incremented attack time by ${config.interval}ms. New time: ${currentAttackTime}ms`);
+                if (currentAttackTime > config.DefenceTime) {
+                    currentAttackTime = config.AttackTime;
+                    console.log(`Attack time exceeded defense time. Resetting to base: ${currentAttackTime}ms`);
+                }
             } else {
-                 console.log("Rival not found by checkUsername or planet check failed. Skipping attack.");
+                console.log("Rival not found by checkUsername or planet check failed. Skipping attack.");
             }
         } catch (error) {
             console.error(`Error in main loop: ${error.message}. Stack: ${error.stack}`);
-            // Consider if handleError should be called or if loop should continue
-            // await actions.sleep(2000); // Wait after an error before retrying
-			 await actions.reloadPage();
-            // await handleError(error); // This might reload the page, potentially losing state
+            await actions.reloadPage();
         }
     }
 }
 
-
 // Simplified function: waits for sleep, then attempts imprison
-async function executeAttackSequence(sleepDuration) { // Renamed parameter
+async function executeAttackSequence(targetTime) {
     try {
-        const sequenceStartTime = performance.now(); // Record time BEFORE sleep starts
-
-        // Wait for the calculated sleep duration
-        if (sleepDuration > 0) { // Use renamed parameter
-            console.log(`Pausing for calculated sleep: ${formatTiming(sleepDuration)}`); // Use renamed parameter
-            await actions.sleep(sleepDuration); // Use renamed parameter
-            console.log(`Finished sleep.`);
+        if (targetTime > 0) {
+            console.log(`Waiting ${targetTime}ms until target execution time`);
+            const waitStart = Date.now();
+            await actions.sleep(targetTime);
+            const actualWaitTime = Date.now() - waitStart;
+            console.log(`Wait complete. Requested: ${targetTime}ms, Actual: ${actualWaitTime}ms`);
         } else {
-            console.log("Calculated sleep duration is zero or negative. Proceeding immediately.");
+            console.log("Target execution time already passed. Proceeding immediately.");
         }
 
-        // Attempt the imprison action directly, passing the sequence start time
-        console.log("Attempting imprison action...");
-        await imprison(sequenceStartTime); // <-- Pass the sequence start time recorded before sleep
+        console.log(`Executing imprison action at: ${Date.now()} (${new Date().toISOString()})`);
+        await imprison();
         console.log("Imprison action successful.");
-
     } catch (error) {
-        // Log error from sleep or imprison
-        console.error(`Error during attack sequence (sleep or imprison): ${error.message}`);
-        // Re-throw the error so the main loop can handle it (e.g., reload page)
+        console.error(`Error during attack sequence: ${error.message}`);
         throw error;
     }
 }
+
 async function initialConnection() {
     try {
         await actions.sleep(4000);
