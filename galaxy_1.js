@@ -1,39 +1,47 @@
 const puppeteer = require('puppeteer');
 const fs = require('fs').promises;
+const fsSync = require('fs');  // For file watching
 const path = require('path');
 const { Buffer } = require('buffer'); // Needed for potential Base64 decoding
 
-// Read configuration from config1.json
-let config;
-try {
-    config = require('./config1.json');
-} catch (error) {
-    console.error("Error reading config1.json:", error);
-    process.exit(1);
+// Function to update config values
+function updateConfigValues() {
+    try {
+        // Clear require cache to get fresh config
+        delete require.cache[require.resolve('./config1.json')];
+        config = require('./config1.json');
+        
+        // Update values
+        rivalNamesArg = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
+        planetNameArg = config.planetName;
+        recoveryCodeArg = config.RC;
+        timingParams.startAttack = config.startAttackTime || 0;
+        timingParams.startIntervalAttack = config.attackIntervalTime || 100;
+        timingParams.stopAttack = config.stopAttackTime || 5000;
+        timingParams.startDefence = config.startDefenceTime || 0;
+        timingParams.startDefenceInterval = config.defenceIntervalTime || 100;
+        timingParams.stopDefence = config.stopDefenceTime || 5000;
+
+        console.log("Configuration updated from file:", config);
+    } catch (error) {
+        console.error("Error updating config:", error);
+    }
 }
+
+// Initial config read
+let config;
+let rivalNamesArg, planetNameArg, recoveryCodeArg, timingParams = {};
+updateConfigValues();
+
+// Watch for config file changes
+fsSync.watch('config1.json', (eventType, filename) => {
+    if (eventType === 'change') {
+        console.log('Config file changed, updating values...');
+        updateConfigValues();
+    }
+});
 
 // Set variables from config
-const rivalNamesArg = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
-const planetNameArg = config.planetName;
-const recoveryCodeArg = config.RC;
-const timingParams = {
-    startAttack: config.startAttackTime || 0,
-    startIntervalAttack: config.attackIntervalTime || 100,
-    stopAttack: config.stopAttackTime || 5000,
-    startDefence: config.startDefenceTime || 0,
-    startDefenceInterval: config.defenceIntervalTime || 100,
-    stopDefence: config.stopDefenceTime || 5000
-};
-
-// --- Validate Arguments ---
-if (!rivalNamesArg) {
-    console.error("Error: Please provide rival names as the first argument");
-    console.error("Usage: node galaxyTamper.js <rivalNames> <planetName> [startAttack] [startIntervalAttack] [stopAttack] [startDefence] [startDefenceInterval] [stopDefence]");
-    console.error("Example: node galaxyTamper.js \"]--BEAST--[.``THALA``\" \"PrisonPlanet\" [timing params...]");
-    process.exit(1);
-}
-
-// Parse rival names - split by commas if multiple names are provided
 const rivalNames = rivalNamesArg.split(',');
 const planetName = planetNameArg || ""; // Default to empty string if not provided
 
