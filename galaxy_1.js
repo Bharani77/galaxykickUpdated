@@ -1,532 +1,589 @@
-const WebSocket = require('ws');
-const fs = require('fs');
-const { exec } = require('child_process');
-const performance = require('perf_hooks').performance;
+const puppeteer = require('puppeteer');
+const fs = require('fs').promises;
+const path = require('path');
+const { Buffer } = require('buffer'); // Needed for potential Base64 decoding
 
-function formatTiming(ms) {
-    return `${ms.toFixed(2)}ms`;
-}
-
-let socket;
-let rivalDetectedTime = 0; // Will hold the precise detection timestamp in ms
-let isReconnecting = false;
-let flag = 0;
-let count = 0;
-let tempTime1 = 0;
-let rivalDetectedViaWebSocket = false;
-let currentAttackTime = 0;
-
-// Remove estimated durations from static config
-let config = {
-    RC: '',
-    AttackTime: 0,
-    DefenceTime: 0,
-    DefenceTime1: 0,
-    planetName: '',
-    interval: 0,
-    rival: []
+// --- Parse Command Line Arguments ---
+const args = process.argv.slice(2);
+const rivalNamesArg = args[0];
+const planetNameArg = args[1]; // New planet name argument
+const recoveryCodeArg = args[2]; // New recovery code argument
+const timingParams = {
+    startAttack: parseInt(args[3]) || 0,
+    startIntervalAttack: parseInt(args[4]) || 100,
+    stopAttack: parseInt(args[5]) || 5000,
+    startDefence: parseInt(args[6]) || 0,
+    startDefenceInterval: parseInt(args[7]) || 100,
+    stopDefence: parseInt(args[8]) || 5000
 };
 
-function loadConfig() {
-    try {
-        const data = fs.readFileSync('config1.json', 'utf8');
-        const loadedConfig = JSON.parse(data);
-
-        // Assign loaded values
-        config.RC = loadedConfig.RC || '';
-        config.AttackTime = loadedConfig.AttackTime || 0;
-        config.DefenceTime = loadedConfig.DefenceTime || 0;
-        config.planetName = loadedConfig.planetName || '';
-        config.interval = loadedConfig.interval || 0;
-        // Note: estimated durations are NOT loaded from config anymore
-
-        // Handle rival array
-        config.rival = Array.isArray(loadedConfig.rival) ? loadedConfig.rival : (loadedConfig.rival ? [loadedConfig.rival] : []);
-        config.rival = config.rival.map(r => r.trim());
-
-        // Update derived values
-        config.DefenceTime1 = config.DefenceTime;
-        tempTime1 = config.AttackTime;
-        currentAttackTime = config.AttackTime; // Initialize currentAttackTime
-
-        console.log('Config updated:', config);
-    } catch (err) {
-        console.error('Error reading or parsing config file:', err);
-        // Keep existing config or defaults if loading fails
-    }
+// --- Validate Arguments ---
+if (!rivalNamesArg) {
+    console.error("Error: Please provide rival names as the first argument");
+    console.error("Usage: node galaxyTamper.js <rivalNames> <planetName> [startAttack] [startIntervalAttack] [stopAttack] [startDefence] [startDefenceInterval] [stopDefence]");
+    console.error("Example: node galaxyTamper.js \"]--BEAST--[.``THALA``\" \"PrisonPlanet\" [timing params...]");
+    process.exit(1);
 }
 
-loadConfig();
+// Parse rival names - split by commas if multiple names are provided
+const rivalNames = rivalNamesArg.split(',');
+const planetName = planetNameArg || ""; // Default to empty string if not provided
 
-fs.watch('config1.json', (eventType) => {
-    if (eventType === 'change') {
-        console.log('Config file changed. Reloading...');
-        loadConfig();
-    }
+// --- Configuration ---
+const scriptPath = path.join(__dirname, 'login.user_1.js'); // Your Tampermonkey script path
+const prisonScriptPath = path.join(__dirname, 'prison.user_1.js'); // Path to the prison unlock script
+const targetUrl = 'https://galaxy.mobstudio.ru/web/';
+const recoveryCode = recoveryCodeArg; // Default to the original value if not provided
+const postLoginSelector = '.mdc-button > .mdc-top-app-bar__title'; // Selector to verify login
+
+// --- Display Configuration ---
+console.log("=== Galaxy Auto-Attacker Configuration ===");
+console.log(`Target URL: ${targetUrl}`);
+console.log(`Rival Names: ${rivalNames.join(', ')}`);
+console.log(`Planet Name: ${planetName}`);
+console.log("Timing Parameters:", timingParams);
+console.log("=======================================");
+
+let browser; // Make browser accessible in the outer scope for cleanup
+let page; // Make page accessible
+let cdpClient = null; // To hold the CDP session
+let isTampermonkeyRunning = false; // Flag to prevent concurrent runs
+let stopMonitoring = false; // Flag to signal shutdown
+let isPrisonMode = false; // Flag to track if we're handling a prison
+
+// Helper to escape regex characters in rival name
+function escapeRegex(str) {
+    if (!str) return '';
+    return str.replace(/[.*+?^${}()|[\]\\`]/g, '\\$&');
+}
+
+// Create regex patterns for each rival name
+const joinRegexes = [];
+const listRegexes = [];
+rivalNames.forEach((rivalName) => {
+    const escapedRivalName = escapeRegex(rivalName);
+    console.log(`[Setup] Created escaped regex for '${rivalName}': ${escapedRivalName}`);
+    
+    joinRegexes.push(new RegExp(`JOIN\\s+[-\\s\\w]*${escapedRivalName}\\s+\\d+`, 'i')); 
+    listRegexes.push(new RegExp(`353\\s+\\d+.*?@?${escapedRivalName}\\s+\\d+`, 'i'));
+    joinRegexes.push(new RegExp(`JOIN.*?${escapedRivalName}`, 'i'));
+    listRegexes.push(new RegExp(`353.*?${escapedRivalName}`, 'i'));
 });
 
-async function handleError(error) {
-    console.error("An error occurred:", error);
-    try {
-        await actions.reloadPage();
-    } catch (reloadError) {
-        console.error("Failed to reload page:", reloadError);
-    }
+console.log("[Debug] JOIN regex patterns:");
+joinRegexes.forEach((regex, i) => console.log(`  [${i}]: ${regex}`));
+
+// Create regex pattern for planet name if provided
+let planetRegex = null;
+if (planetName) {
+    const escapedPlanetName = escapeRegex(planetName);
+    planetRegex = new RegExp(escapedPlanetName, 'i'); // Case insensitive
 }
 
-function setupWebSocket() {
+// Prison detection regex
+const prisonRegex = /\bPRISON\b/i;
+const joinPrisonRegex = /JOIN\s*.+?Prison/i;
+const listPrisonRegex = /353\s*.+?Prison/i;
+
+// --- Main Async Function ---
+(async () => {
     try {
-        socket = new WebSocket('ws://localhost:8080');
+        console.log('Launching browser...');
+        browser = await puppeteer.launch({
+            headless: "new",
+            args: [
+                '--start-maximized',
+                '--disable-infobars',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+				'--disable-setuid-sandbox',
+				'--disable-web-security',
+				'--disable-features=IsolateOrigins,site-per-process',
+				'--disable-csp'
+            ],
+        });
+        page = await browser.newPage();
+        console.log('Browser launched, new page created.');
 
-        socket.onopen = async function() {
-            console.log(isReconnecting ? "Reconnection successful" : "Connected to WebSocket server");
-            if (!isReconnecting) {
-                await initialConnection();
+        // --- Console/Error Logging from Browser ---
+        page.on('console', msg => {
+            const type = msg.type().toUpperCase();
+            const text = msg.text();
+            console.log(`[BROWSER ${type}] ${text}`);
+        });
+        page.on('pageerror', error => console.error(`[BROWSER PAGEERROR] ${error.message}\n${error.stack}`));
+        page.on('requestfailed', request => console.warn(`[BROWSER REQFAIL] ${request.method()} ${request.url()} ${request.failure()?.errorText}`));
+        page.on('close', () => {
+            console.log('[Puppeteer] Page closed event detected.');
+            stopMonitoring = true;
+            if (cdpClient && cdpClient.connection()) {
+                cdpClient.detach().catch(e => console.error("Error detaching CDP on close:", e));
+                cdpClient = null;
             }
-            isReconnecting = false;
-        };
+        });
 
-        socket.onclose = function() {
-            if (!isReconnecting) {
-                console.log("WebSocket connection closed.");
-                handleError("Error");
-                process.exit(1);
-            }
-        };
+        await page.setViewport({ width: 1366, height: 768 });
+        console.log('Viewport set.');
 
-        socket.onerror = function(error) {
-            console.error("WebSocket Error:", error);
-            handleError(error);
-        };
+        // --- Storage Simulation & Tampermonkey Communication ---
+        console.log('Exposing functions for Tampermonkey...');
+        const storage = {};
+        await page.exposeFunction('GM_getValue_puppeteer', async (k, d) => storage[k] ?? d);
+        await page.exposeFunction('GM_setValue_puppeteer', (k, v) => {
+            storage[k] = v;
+            return v;
+        });
+        
+        await page.exposeFunction('notifyPrisonScriptComplete', async (status) => {
+            if (stopMonitoring) return;
+            console.log(`[Puppeteer] Prison unlock script completed. Status: ${status}`);
+            isPrisonMode = false;
+            await restartMonitoring(null); // No payloadData available here
+        });
+        
+        await page.exposeFunction('notifyPuppeteerComplete', async (status) => {
+            if (stopMonitoring) return;
+            console.log(`[Puppeteer] Tampermonkey signaled completion. Status: ${status}`);
+            isTampermonkeyRunning = false;
+            await restartMonitoring(null); // No payloadData available here
+        });
+        
+        await page.exposeFunction('reportTampermonkeyError', (errorMessage) => {
+            console.error(`[Tampermonkey ERROR REPORT] ${errorMessage}`);
+        });
+        console.log('Functions exposed.');
 
-        // Enhanced message listener with precise timestamp handling
-        socket.onmessage = function(event) {
-            try {
-                const message = JSON.parse(event.data);
-                
-                // Process the rivalDetected signal with precise timing
-                if (message.action === 'rivalDetected') {
-                    const detectedRival = message.rivalName;
-                    // Use the exact timestamp received from the WebSocket server
-                    const detectionTimestamp = message.timestamp;
-                    
-                    // Format the time for human-readable logs
-                    const detectionTime = new Date(detectionTimestamp);
-                    const timeString = detectionTime.toTimeString().split(' ')[0] + 
-                                      '.' + detectionTime.getMilliseconds().toString().padStart(3, '0');
-                    
-                    console.log(`[WebSocket] Received rivalDetected signal for: ${detectedRival}`);
-                    console.log(`[WebSocket] Detection time: ${timeString} (${detectionTimestamp}ms)`);
-                    
-                    // Store the exact timestamp for timing calculations
-                    rivalDetectedTime = detectionTimestamp;
-                    
-                    // Set the detection flag
-                    rivalDetectedViaWebSocket = true;
+        // --- UserScript Injection ---
+        console.log(`Injecting Tampermonkey script: ${scriptPath}`);
+        const userScript = await fs.readFile(scriptPath, 'utf8');
+        console.log(`Loading prison unlock script: ${prisonScriptPath}`);
+        const prisonScript = await fs.readFile(prisonScriptPath, 'utf8');
+await page.evaluateOnNewDocument((userScriptContent, prisonScriptContent) => {
+    console.log('[Browser] Setting up GM environment in evaluateOnNewDocument...');
+    
+    // Setup GM environment
+    window.GM_getValue = (key, defaultValue) => {
+        console.log(`[Browser GM] Getting value for key: ${key}`);
+        if (typeof window.GM_getValue_puppeteer === 'function') {
+            return window.GM_getValue_puppeteer(key, defaultValue);
+        }
+        console.warn(`[Browser GM] GM_getValue_puppeteer not available yet for key: ${key}`);
+        return defaultValue;
+    };
+    
+    window.GM_setValue = (key, value) => {
+        console.log(`[Browser GM] Setting value for key: ${key}`);
+        if (typeof window.GM_setValue_puppeteer === 'function') {
+            return window.GM_setValue_puppeteer(key, value);
+        }
+        console.warn(`[Browser GM] GM_setValue_puppeteer not available yet for key: ${key}`);
+        return value;
+    };
+    
+    window.unsafeWindow = window;
+    window.GM_addStyle = (css) => { 
+        let style = document.createElement('style'); 
+        style.textContent = css; 
+        document.head.append(style); 
+    };
+    window.GM_xmlhttpRequest = () => console.warn('GM_xmlhttpRequest not implemented');
+    window.GM_registerMenuCommand = () => console.warn('GM_registerMenuCommand not implemented');
+    window.GM_log = console.log;
+    
+    // Store scripts for execution after page load
+    window.prisonScriptContent = prisonScriptContent;
+    window.userScriptContent = userScriptContent;
+    
+    // Setup execution functions
+    window.executeUserScript = function() {
+        console.log('[Browser] Executing main user script...');
+        try {
+            new Function(window.userScriptContent)();
+            console.log('[Browser] Main user script executed successfully');
+        } catch (e) {
+            console.error('[Browser] Error executing main user script:', e);
+        }
+    };
+    
+    window.executePrisonScript = function() {
+        try {
+            console.log('[Browser] Executing prison unlock script...');
+            new Function(window.prisonScriptContent)();
+            window.prisonTimeoutId = setTimeout(() => {
+                if (typeof window.notifyPrisonScriptComplete === 'function') {
+                    console.log('[Browser] Prison script timeout - forcing completion signal');
+                    window.notifyPrisonScriptComplete('TIMEOUT_COMPLETED');
                 }
-            } catch (parseError) {
-                console.error("[WebSocket] Error parsing message:", parseError, event.data);
+            }, 20000);
+        } catch (e) {
+            console.error('[Browser] Error executing Prison script:', e);
+            if (typeof window.notifyPrisonScriptComplete === 'function') {
+                window.notifyPrisonScriptComplete('ERROR');
             }
-        };
-    } catch(error) {
-        handleError(error);
+        }
+    };
+    
+    // Auto-execute the main user script after DOM is loaded
+    document.addEventListener('DOMContentLoaded', () => {
+        console.log('[Browser] DOMContentLoaded event fired, executing user script...');
+        window.executeUserScript();
+    });
+    
+    console.log('[Browser] evaluateOnNewDocument setup complete');
+}, userScript, prisonScript);
+
+// After page load, verify script execution and function availability
+console.log('Navigating to target site...');
+await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 90000 });
+
+// After navigation completes
+console.log('After navigation, verifying script execution...');
+await page.evaluate(() => {
+    console.log('[Browser] In page.evaluate verification');
+    console.log('[Browser] tampermonkeyReady =', window.tampermonkeyReady);
+    console.log('[Browser] executeTampermonkeyLogic exists =', typeof window.executeTampermonkeyLogic === 'function');
+});
+
+        try {
+            await page.evaluate((script) => {
+                new Function(script)();
+            }, userScript);
+            console.log('[Browser] UserScript evaluated successfully.');
+        } catch (e) {
+            console.error('[Browser] Error executing UserScript:', e.message, e.stack);
+        }
+
+        
+        console.log('Navigation complete.');
+        await delay(3000);
+        await page.click('.mdc-button--black-secondary > .mdc-button__label', { visible: true });
+        await page.click('input[name="recoveryCode"]', { visible: true });
+        await page.type('input[name="recoveryCode"]', recoveryCode, { delay: 50 });
+        console.log('Waiting for final login button...');
+        await page.click('.mdc-dialog__button:nth-child(2)');
+        console.log('Login navigation likely complete.');
+		await delay(550);
+		const pageContent = await page.content();
+		console.log('Page title:', await page.title());
+		console.log('Scripts on page:', await page.evaluate(() => {
+			return Array.from(document.querySelectorAll('script')).map(s => s.src || 'inline');
+		}));
+		await page.evaluate(() => {
+			console.log("[Debug] Window properties:", Object.keys(window));
+			console.log("[Debug] tampermonkeyReady value:", window.tampermonkeyReady);
+			// Force setting ready status for testing
+			window.tampermonkeyReady = window.tampermonkeyReady || true;
+		});
+        // Wait for Tampermonkey script to be ready
+        await page.waitForFunction(() => {
+				return window.tampermonkeyReady === true || 
+					   window.tampermonkeyReady === 'error';
+			}, { timeout: 45000 });
+
+			const readyState = await page.evaluate(() => window.tampermonkeyReady);
+			if(readyState !== true) {
+				throw new Error(`Tampermonkey script failed to initialize: ${readyState}`);
+			}
+
+        // --- Set Configuration Parameters in Browser Context ---
+        console.log('Storing rival names, planet name and timing parameters for Tampermonkey...');
+        await page.evaluate(async (names, planet, params) => {
+            await window.GM_setValue('RIVAL_NAMES', names);
+            await window.GM_setValue('PLANET_NAME', planet);
+            await window.GM_setValue('TIMING_PARAMS', JSON.stringify(params));
+            console.log('[Browser] Rival names, planet name and timing stored via GM_setValue.');
+        }, rivalNames, planetName, timingParams);
+        console.log('Configuration stored in browser context.');
+
+        // --- Initial Start of Monitoring ---
+        await setupWebSocketListener();
+
+        console.log('Initialization complete. Monitoring WebSocket messages...');
+        await new Promise(resolve => {});
+
+    } catch (error) {
+        console.error('Error in main Puppeteer script:', error);
+        await takeScreenshotOnError(page);
+        stopMonitoring = true;
+        if (browser) {
+            await browser.close().catch(e => console.error("Error closing browser during error handling:", e));
+        }
+        process.exit(1);
     }
-}
+})();
 
-async function sendMessage(message) {
-    if (socket.readyState !== WebSocket.OPEN) {
-        throw new Error(`WebSocket is not open. Current state: ${socket.readyState}`);
+// --- WebSocket Monitoring Function ---
+async function setupWebSocketListener() {
+    if (stopMonitoring || !page || page.isClosed()) {
+        console.log("[Puppeteer] Skipping WebSocket listener setup (stop signal or page closed).");
+        return;
     }
 
-    console.log("Sending message:", message);
-    socket.send(JSON.stringify(message));
+    if (cdpClient) {
+        console.log("[Puppeteer] Detaching existing CDP session before creating new one.");
+        try {
+            await cdpClient.removeAllListeners();
+            await cdpClient.detach();
+        } catch (e) {
+            console.warn("Warning: Error detaching previous CDP client:", e.message);
+        }
+        cdpClient = null;
+    }
 
-    return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            reject(new Error('Timeout waiting for server response'));
-        }, 10000);
+    try {
+        console.log('[Puppeteer] Setting up WebSocket listener...');
+        isTampermonkeyRunning = false;
+        isPrisonMode = false;
 
-        // This specific handler is added temporarily for *this* sendMessage call
-        const messageHandler = (event) => {
-            let response;
-            try {
-                response = JSON.parse(event.data);
-            } catch (e) {
-                // Ignore messages that aren't valid JSON or the targetDetected signal
-                console.warn("[sendMessage Handler] Ignoring non-JSON message or parse error:", event.data);
+        cdpClient = await page.target().createCDPSession();
+        await cdpClient.send('Network.enable');
+        console.log('[Puppeteer] CDP Network domain enabled.');
+
+        const webSocketFrameReceivedListener = async ({ requestId, timestamp, response }) => {
+            if (stopMonitoring) return;
+            if (isTampermonkeyRunning || isPrisonMode) {
+                return;
+            }
+            if (!page || page.isClosed()) {
+                console.log('[Puppeteer WS] Skipping message - Page is closed.');
+                if (cdpClient) await cdpClient.detach().catch(e => e);
+                return;
+            }
+            if (response.opcode !== 1) {
                 return;
             }
 
-            // Only process if it's a response to the action we sent
-            if (response.action === message.action) {
-                clearTimeout(timeout);
-                socket.removeEventListener('message', messageHandler); // Clean up this specific handler
+            const payloadData = response.payloadData;
+            console.log(`[Puppeteer WS Received] Payload: ${payloadData.substring(0, 200)}...`);
 
-                if (response.status === 'success') {
-                    resolve(response);
-                } else {
-                    reject(new Error(response.message));
-                }
-            }
-            // Other messages (like targetDetected) will be handled by the global socket.onmessage
-        };
-
-        socket.addEventListener('message', messageHandler);
-    });
-}
-            /* Original relevant part: (This comment block was misplaced and is being removed)
-            const response = JSON.parse(event.data);
-            if (response.action !== message.action) return;
-
-            clearTimeout(timeout);
-            socket.removeEventListener('message', messageHandler);
-
-            if (response.status === 'success') {
-                resolve(response);
-            } else {
-                reject(new Error(response.message));
-            }
-        };
-
-        socket.addEventListener('message', messageHandler);
-    });
-}*/ // End of removed misplaced comment block
-
-
-const actions = {
-    switchToFrame: async (frameIndex, selectorType, selector) => {
-        try {
-            return await sendMessage({ action: 'switchToFrame', frameIndex, selectorType, selector });
-        } catch (error) {
-            console.error('Error in switchToFrame:', error);
-            throw error;
-        }
-    },
-    switchToFramePlanet: async (frameIndex, selectorType, selector) => {
-        try {
-            return await sendMessage({ action: 'switchToFramePlanet', frameIndex, selectorType, selector });
-        } catch (error) {
-            console.error('Error in switchToFramePlanet:', error);
-            throw error;
-        }
-    },
-    switchToDefaultFrame: async (selector) => {
-        try {
-            return await sendMessage({ action: 'switchToDefaultFrame', selector });
-        } catch (error) {
-            console.error('Error in switchToDefaultFrame:', error);
-            throw error;
-        }
-    },
-    click: (selector) => sendMessage({ action: 'click', selector }),
-	runAiChat: (user) => sendMessage({ action: 'runAiChat', user }),
-    xpath: (xpath) => sendMessage({ action: 'xpath', xpath }),
-    enterRecoveryCode: (code) => sendMessage({ action: 'enterRecoveryCode', code }),
-    sleep: (ms) => sendMessage({ action: 'sleep', ms }),
-    scroll: (selector) => sendMessage({ action: 'scroll', selector }),
-    pressShiftC: (selector) => sendMessage({ action: 'pressShiftC', selector }),
-    waitForClickable: (selector) => sendMessage({ action: 'waitForClickable', selector }),
-    findAndClickByPartialText: async (text) => {
-        try {
-            let response = await sendMessage({ action: 'findAndClickByPartialText', text });
-            if (!response || !('flag' in response)) {
-                throw new Error('Flag not found in response');
-            }
-            return response;
-        } catch (error) {
-            console.error('Error in findAndClickByPartialText:', error);
-            throw error;
-        }
-    },
-    reloadPage: async () => {
-        isReconnecting = true;
-        try {
-            await sendMessage({ action: 'reloadPage' });
-            console.log("Page reloaded and WebSocket reconnected");
-        } catch (error) {
-            console.error("Error during page reload:", error);
-        } finally {
-            isReconnecting = false;
-        }
-    },
-    checkUsername: async (rivals) => {
-		try {
-			// Convert single rival to array if needed
-			const rivalsArray = Array.isArray(rivals) ? rivals : [rivals];
-			const quotedRivals = rivalsArray.map(r => `${r.trim()}`);
-			const result = await sendMessage({
-				action: 'checkUsername',
-				selector: '.planet-bar__item-name__name',
-				expectedText: quotedRivals // Send array of trimmed rival names
-			});
-			return result.matches || false;
-		} catch (error) {
-			console.error('Error in checkUsername:', error);
-			return false;
-		}
-    },
-    searchAndClick: async (rivals) => {
-        if (!Array.isArray(rivals)) throw new Error('rivals must be an array');
-        try {
-            let response = await sendMessage({ action: 'searchAndClick', rivals });
-            if (!response || !('flag' in response) || !('matchedRival' in response)) {
-                throw new Error('Flag or matchedRival not found in response');
-            }
-            return response;
-        } catch (error) {
-            console.error('Error in searchAndClick:', error);
-            throw error;
-        }
-    },
-    enhancedSearchAndClick: (position) => sendMessage({ action: 'enhancedSearchAndClick', position }),
-    doubleClick: (selector) => sendMessage({ action: 'doubleClick', selector }),
-    performSequentialActions: (actions) => sendMessage({ action: 'performSequentialActions', actions })
-};
-
-async function checkIfInPrison(planetName) {
-    try {
-        console.log("Checking if in prison...");
-        const result = await actions.findAndClickByPartialText(planetName);
-        console.log("Prison check result:", result);
-        if (!result.flag) {
-            await actions.waitForClickable('.planet-bar__button__action > img');
-            await actions.click('.mdc-button > .mdc-top-app-bar__title');
-            console.log("Prison element found and clicked");
-            return true;
-        } else {
-            console.log("Not in prison");
-            return false;
-        }
-    } catch (error) {
-        console.error("Error in checkIfInPrison:", error);
-        return false;
-    }
-}
-
-async function autoRelease() {
-    try {
-           //actions.sleep(3000);
-           const actionss = [
-            { action: 'xpath', xpath: "//span[contains(.,'Planet Info')]" },
-            { action: 'sleep', ms: 3000 },
-            { action: 'switchToFrame', frameIndex: 1, selectorType: 'css', selector: '.free__early__release:nth-child(2) .free__early__release__title' },
-            { action: 'sleep', ms: 250 },
-            { action: 'switchToFrame', frameIndex: 1, selectorType: 'css', selector: '#yes_btn > p' },
-            { action: 'sleep', ms: 250 },
-            { action: 'switchToDefaultFrame', selector: '.mdc-icon-button > img' },
-            { action: 'sleep', ms: 4000 },
-            { action: 'switchToFrame', frameIndex: 1, selectorType: 'css', selector: '.s__gd__plank:nth-child(1) .text' },
-            { action: 'sleep', ms: 500 },
-            { action: 'switchToFramePlanet', frameIndex: 2, selectorType: 'css', selector: 'div.gc-action > a' }
-        ];
-
-        for (const action of actionss) {
-
-            await sendMessage(action);
-        }
-
-        console.log("Auto-release successful. Reloading page...");
-        await actions.reloadPage(); // Ensure reload is present
-    } catch (error) {
-        console.error("Error in autoRelease:", error);
-        // Consider if reload is needed on error too, maybe not if main loop handles errors
-        throw error;
-    }
-}
-
-async function executeRivalChecks(planetName) {
-    try {
-        await actions.xpath(`//span[contains(.,'${planetName}')]`);
-        await actions.xpath(`//span[contains(.,'Online now')]`);
-        return true;
-    } catch (error) {
-        if (error.message === "No matching name found") {
-            console.log("No matching name found");
-            return false;
-        }
-        console.error("Error in executeRivalChecks:", error);
-        throw error;
-    }
-}
-
-async function imprison() {
-    try {
-        // First verification: Check if rival is present in the planet
-        let rivalCheckResult1 = await actions.checkUsername(config.rival);
-
-        if (rivalCheckResult1) {
-            console.log("Rival verified successfully, proceeding with imprisonment");
-
-            // Press Shift+C first
-            await sendMessage({ action: 'pressShiftC', selector: ".planet-bar__button__action > img" });
-            
-            // Execute the final sequence immediately
-            const finalSequenceActions = [
-                { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" },
-                { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-            ];
-
-            // Send the final sequence
-            await sendMessage({ action: 'performSequentialActions', actions: finalSequenceActions });
-
-            console.log("Imprison actions completed successfully, reloading page...");
-            await actions.reloadPage(); // Reload after successful imprison
-
-        } else {
-            console.log("Rival verification failed, reloading page...");
-            await actions.reloadPage(); // Reload if rival check fails
-        }
-    } catch (error) {
-        console.error("Error during imprison:", error);
-        // Ensure safe exit even in case of error by reloading
-        try {
-            console.log("Attempting reload after imprison error...");
-            await actions.reloadPage();
-        } catch (reloadError) {
-            console.error("Error during safe exit reload:", reloadError);
-        }
-        throw error;
-    }
-}
-async function waitForElement(selector, maxAttempts = 5, interval = 50) {
-    for (let i = 0; i < maxAttempts; i++) {
-        try {
-            await actions.waitForClickable(selector);
-            return true;
-        } catch (error) {
-            if (i === maxAttempts - 1) throw error;
-            await new Promise(resolve => setTimeout(resolve, interval));
-        }
-    }
-    return false;
-}
-async function mainLoop() {
-    while (true) {
-        rivalDetectedViaWebSocket = false;
-        rivalDetectedTime = 0;
-        
-        try {
-            await actions.waitForClickable('.planet__events');
-
-            const isInPrison = await checkIfInPrison(config.planetName);
-            if (isInPrison) {
-                console.log("In prison. Executing auto-release...");
-                await autoRelease();
-                continue;
-            }
-
-            if (!rivalDetectedViaWebSocket) {
-                console.log("Rival not detected via WebSocket yet. Waiting...");
-                continue;
-            }
-            
-            console.log("Rival detected via WebSocket. Proceeding with planet/rival checks...");
-            console.log(`Detection timestamp: ${rivalDetectedTime} (${new Date(rivalDetectedTime).toISOString()})`);
-
-            let planetOk = false;
             try {
-                console.log(`Checking for planet: ${config.planetName}`);
-                await actions.xpath(`//span[contains(.,'${config.planetName}')]`);
-                console.log(`Checking for 'Online now'`);
-                await actions.xpath(`//span[contains(.,'Online now')]`);
-                console.log("Clicked 'Online now'. Waiting for list...");
-                await actions.sleep(150);
-                console.log("Planet and Online status confirmed via xpath.");
-                planetOk = true;
-            } catch (planetError) {
-                console.log(`Planet/Online check failed via xpath: ${planetError.message}. Retrying next loop.`);
-                await actions.reloadPage();
-                continue;
-            }
+                if (joinPrisonRegex.test(payloadData) || listPrisonRegex.test(payloadData) || prisonRegex.test(payloadData)) {
+                    console.log('[Puppeteer] Prison detected in WebSocket message. Triggering prison unlock script.');
+                    isPrisonMode = true;
+                    await page.evaluate(() => {
+                        if (typeof window.executePrisonScript === 'function') {
+                            console.log('[Browser] Executing prison unlock script');
+                            window.executePrisonScript();
+                            window.prisonTimeoutId = setTimeout(() => {
+                                if (typeof window.notifyPrisonScriptComplete === 'function') {
+                                    console.log('[Browser] Prison script timeout - forcing completion signal');
+                                    window.notifyPrisonScriptComplete('TIMEOUT_COMPLETED');
+                                }
+                            }, 20000);
+                        } else {
+                            console.error('[Browser] Error: executePrisonScript function not defined!');
+                            if (typeof window.reportTampermonkeyError === 'function') {
+                                window.reportTampermonkeyError('executePrisonScript function not found');
+                            }
+                        }
+                    }).catch(evalError => {
+                        console.error(`[Puppeteer] Error during page.evaluate for prison script: ${evalError}`);
+                        isPrisonMode = false;
+                    });
+                    return;
+                }
 
-            let rivalPresent = false;
-            let matchedRivalName = null;
-            if (planetOk) {
-                console.log("Waiting for rival presence using XPath...");
-                try {
-                    let searchResult = await actions.searchAndClick(config.rival);
-                    let found = searchResult.matchedRival;
-                    if (searchResult.flag && found) {
-                        rivalPresent = true;
-                    } else {
-                        rivalPresent = false;
-                        console.log(`No configured rivals found via waitForXPath after checking all.`);
+                let messageType = null;
+                let detectedRivalName = null;
+
+                for (let i = 0; i < rivalNames.length; i++) {
+                    const rivalName = rivalNames[i];
+                    const joinMatchExact = joinRegexes[i].test(payloadData);
+                    const joinFallbackMatch = joinRegexes[i + rivalNames.length].test(payloadData);
+                    const listMatchExact = listRegexes[i].test(payloadData);
+                    const listFallbackMatch = listRegexes[i + rivalNames.length].test(payloadData);
+
+                    console.log(`[Debug] Testing rival '${rivalName}' against: ${payloadData.substring(0, 50)}...`);
+                    console.log(`[Debug] JOIN exact match: ${joinMatchExact}`);
+                    console.log(`[Debug] JOIN fallback match: ${joinFallbackMatch}`);
+
+                    if (joinMatchExact || joinFallbackMatch) {
+                        console.log(`[Debug] SUCCESS! JOIN match found for '${rivalName}'`);
+                        messageType = 'JOIN';
+                        detectedRivalName = rivalName;
+                        break;
+                    } else if (listMatchExact || listFallbackMatch) {
+                        console.log(`[Debug] 353 match found for '${rivalName}'`);
+                        messageType = '353';
+                        detectedRivalName = rivalName;
+                        break;
                     }
-                } catch (generalError) {
-                    console.error(`Error during rival XPath verification: ${generalError.message}.`);
-                    rivalPresent = false;
                 }
-            } else {
-                console.log("Planet check failed, skipping rival verification.");
-            }
 
-            if (rivalPresent) {
-                // Use the precise timestamp for target execution time calculation
-                const targetExecutionTime = rivalDetectedTime + currentAttackTime;
-                const currentTime = Date.now();
-                
-                const waitTimeNeeded = Math.max(0, targetExecutionTime - currentTime);
-                
-                console.log(`Rival found. Will execute attack at time: ${targetExecutionTime} (${new Date(targetExecutionTime).toISOString()})`);
-                console.log(`Current time: ${currentTime} (${new Date(currentTime).toISOString()})`);
-                console.log(`Wait needed: ${waitTimeNeeded}ms`);
-
-                await executeAttackSequence(waitTimeNeeded);
-
-                currentAttackTime += config.interval;
-                console.log(`Incremented attack time by ${config.interval}ms. New time: ${currentAttackTime}ms`);
-                if (currentAttackTime > config.DefenceTime) {
-                    currentAttackTime = config.AttackTime;
-                    console.log(`Attack time exceeded defense time. Resetting to base: ${currentAttackTime}ms`);
+                if (messageType && detectedRivalName) {
+                    console.log(`[Puppeteer] Rival '${detectedRivalName}' detected in WebSocket message (Type: ${messageType}). Triggering Tampermonkey.`);
+                    isTampermonkeyRunning = true;
+                    await page.evaluate((type, rivalName) => {
+                        if (typeof window.executeTampermonkeyLogic === 'function') {
+                            console.log(`[Browser] Calling window.executeTampermonkeyLogic('${type}', '${rivalName}')`);
+                            return Promise.resolve(window.executeTampermonkeyLogic(type, rivalName))
+                                .catch(err => {
+                                    console.error('[Browser] Error executing executeTampermonkeyLogic:', err.message, err.stack);
+                                    if (typeof window.reportTampermonkeyError === 'function') {
+                                        window.reportTampermonkeyError(`Error in executeTampermonkeyLogic: ${err.message}`);
+                                    }
+                                });
+                        } else {
+                            console.error('[Browser] Error: window.executeTampermonkeyLogic is not defined!');
+                            if (typeof window.reportTampermonkeyError === 'function') {
+                                window.reportTampermonkeyError('executeTampermonkeyLogic function not found');
+                            }
+                            return Promise.reject(new Error('executeTampermonkeyLogic function not found'));
+                        }
+                    }, messageType, detectedRivalName).catch(evalError => {
+                        console.error(`[Puppeteer] Error during page.evaluate for Tampermonkey trigger: ${evalError}`);
+                        isTampermonkeyRunning = false;
+                    });
                 }
-            } else {
-                console.log("Rival not found by checkUsername or planet check failed. Skipping attack.");
+
+                // Pass payloadData to checkCurrentPlanetAndAct
+                await checkCurrentPlanetAndAct(payloadData);
+
+            } catch (parseOrCheckError) {
+                console.warn(`[Puppeteer] Error processing WebSocket message: ${parseOrCheckError.message}. Payload: ${payloadData.substring(0, 100)}...`);
             }
-        } catch (error) {
-            console.error(`Error in main loop: ${error.message}. Stack: ${error.stack}`);
-            await actions.reloadPage();
+        };
+
+        cdpClient.on('Network.webSocketFrameReceived', webSocketFrameReceivedListener);
+
+        cdpClient.on('error', (error) => {
+            console.error('[Puppeteer] CDP Error:', error);
+        });
+        cdpClient.on('sessiondetached', () => {
+            console.warn('[Puppeteer] CDP session detached.');
+            cdpClient = null;
+            if (!stopMonitoring) {
+                console.log('[Puppeteer] Attempting to restart monitoring after CDP detachment...');
+                setTimeout(() => restartMonitoring(null), 5000);
+            }
+        });
+
+        console.log('[Puppeteer] WebSocket listener is active.');
+
+    } catch (cdpError) {
+        console.error(`[Puppeteer] Failed to setup WebSocket listener: ${cdpError}`);
+        if (!stopMonitoring) {
+            console.log('[Puppeteer] Retrying listener setup after error...');
+            setTimeout(() => restartMonitoring(null), 10000);
         }
     }
 }
 
-// Simplified function: waits for sleep, then attempts imprison
-async function executeAttackSequence(targetTime) {
+// --- Updated checkCurrentPlanetAndAct Function ---
+async function checkCurrentPlanetAndAct(payloadData) {
+    if (stopMonitoring || !page || page.isClosed()) return;
     try {
-        if (targetTime > 0) {
-            console.log(`Waiting ${targetTime}ms until target execution time`);
-            const waitStart = Date.now();
-            await actions.sleep(targetTime);
-            const actualWaitTime = Date.now() - waitStart;
-            console.log(`Wait complete. Requested: ${targetTime}ms, Actual: ${actualWaitTime}ms`);
-        } else {
-            console.log("Target execution time already passed. Proceeding immediately.");
+        if (payloadData && (joinPrisonRegex.test(payloadData) || listPrisonRegex.test(payloadData) || prisonRegex.test(payloadData))) {
+            console.log("[Planet Check] Detected prison planet via WebSocket payload! Triggering unlock sequence...");
+            isPrisonMode = true;
+            
+            await page.evaluate(() => {
+                if (typeof window.executePrisonScript === 'function') {
+                    window.executePrisonScript();
+                } else {
+                    console.error('[Browser] executePrisonScript not defined');
+                }
+            });
+            // Do not call restartMonitoring here; let notifyPrisonScriptComplete handle it
+        } else if (!payloadData) {
+            console.log("[Planet Check] No payloadData available to check prison state.");
+        }
+    } catch (error) {
+        console.error("[Planet Check] Error during planet verification:", error);
+    }
+}
+// --- Updated restartMonitoring Function ---
+async function restartMonitoring(payloadData) {
+    if (stopMonitoring || !page || page.isClosed()) {
+        console.log("[Puppeteer] Skipping restart (stop signal or page closed).");
+        return;
+    }
+
+    console.log('[Puppeteer] Restarting monitoring cycle...');
+    try {
+        if (cdpClient) {
+            await cdpClient.removeAllListeners();
+            await cdpClient.detach().catch(e => console.warn("Warning: Error detaching CDP client before reload:", e.message));
+            cdpClient = null;
         }
 
-        console.log(`Executing imprison action at: ${Date.now()} (${new Date().toISOString()})`);
-        await imprison();
-        console.log("Imprison action successful.");
-    } catch (error) {
-        console.error(`Error during attack sequence: ${error.message}`);
-        throw error;
+        console.log('[Puppeteer] Reloading page (waitUntil: domcontentloaded)...');
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+        console.log('[Puppeteer] Page reload initiated, DOMContentLoaded likely fired.');
+
+        // Wait for Tampermonkey script to be ready
+        await page.waitForFunction(() => window.tampermonkeyReady === true, { timeout: 30000 });
+        console.log('[Puppeteer] Tampermonkey script is ready after reload.');
+
+        // Check prison state with the provided payloadData (if any) after reload
+        await checkCurrentPlanetAndAct(payloadData);
+
+        try {
+            await Promise.all([
+                page.evaluate(async (names, planet, params) => {
+                    if (typeof window.GM_setValue !== 'function') {
+                        console.error('[Browser] GM_setValue function not found after reload!');
+                        return;
+                    }
+                    await window.GM_setValue('RIVAL_NAMES', names);
+                    await window.GM_setValue('PLANET_NAME', planet);
+                    await window.GM_setValue('TIMING_PARAMS', JSON.stringify(params));
+                    console.log('[Browser] Configuration stored via GM_setValue.');
+                }, rivalNames, planetName, timingParams),
+                setupWebSocketListener()
+            ]);
+            console.log('[Puppeteer] Parallel setup tasks completed.');
+            console.log('[Puppeteer] Restart monitoring cycle setup complete.');
+        } catch (parallelError) {
+            console.error('[Puppeteer] Error during parallel setup:', parallelError);
+            throw parallelError;
+        }
+
+    } catch (reloadError) {
+        console.error('[Puppeteer] Error during page reload/restart sequence:', reloadError);
+        await takeScreenshotOnError(page);
+        console.log('[Puppeteer] Critical error during reload/restart. Stopping monitoring and closing browser.');
+        stopMonitoring = true;
+        if (browser) {
+            await browser.close().catch(e => console.error("Error closing browser after reload failure:", e));
+            browser = null;
+        }
+        process.exit(1);
+    }
+}
+// --- Helper: Screenshot on Error ---
+async function takeScreenshotOnError(pageInstance) {
+    if (pageInstance && !pageInstance.isClosed()) {
+        const screenshotPath = path.join(__dirname, `error_screenshot_${Date.now()}.png`);
+        try {
+            await pageInstance.screenshot({ path: screenshotPath, fullPage: true });
+            console.log(`Screenshot saved to ${screenshotPath}`);
+        } catch (ssError) {
+            console.error(`Failed to take screenshot: ${ssError.message}`);
+        }
+    } else {
+        console.log("Skipping screenshot: Page is closed or not available.");
     }
 }
 
-async function initialConnection() {
-    try {
-        await actions.sleep(4000);
-        await actions.waitForClickable('.mdc-button--black-secondary > .mdc-button__label');
-        //await actions.xpath("//a[2]/div");
-        await actions.click('.mdc-button--black-secondary > .mdc-button__label');
-        console.log("First button clicked");
-        await actions.enterRecoveryCode(config.RC);
-        console.log("Recovery code entered");
-        await actions.click('.mdc-dialog__button:nth-child(2)');
-        console.log("Second button clicked");
-		await actions.runAiChat("]--BEAST--["); //change this
-        await mainLoop();
-    } catch (error) {
-        await handleError(error);
+// --- Graceful Shutdown ---
+process.on('SIGINT', async () => {
+    console.log('\n[Puppeteer] SIGINT received. Shutting down gracefully...');
+    stopMonitoring = true;
+    if (cdpClient) {
+        console.log('[Puppeteer] Detaching CDP client...');
+        await cdpClient.detach().catch(e => console.error("Error detaching CDP on SIGINT:", e.message));
     }
-}
+    if (browser) {
+        console.log('[Puppeteer] Closing browser...');
+        await browser.close();
+        browser = null;
+    }
+    console.log('[Puppeteer] Shutdown complete.');
+    process.exit(0);
+});
 
-setupWebSocket();
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
