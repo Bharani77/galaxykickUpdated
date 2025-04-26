@@ -33,7 +33,8 @@
           titleButton: ".mdc-button > .mdc-top-app-bar__title", // Button to open main menu?
           actionImage: ".planet-bar__button__action > img", // Button on player profile?
           playerListMenuOption: ".-list > .mdc-list-item:nth-child(3) > .mdc-list-item__text", // "Players" option in main menu?
-          attackActionMenuItem: ".mdc-menu .mdc-list-item:nth-child(4) > .mdc-list-item__text", // "Attack" option in action menu? CHECK NESTING
+          attackActionMenuItem: ".mdc-menu .mdc-list-item:last-child > .mdc-list-item__text",
+          // "Attack" option in action menu? CHECK NESTING
           finalConfirmationItem: ".mdc-list-item:nth-child(18)", // Final attack type / confirmation?
           resetUiElement: ".start__user:nth-child(1) > .start__user__avatar" // User's own avatar to reset UI?
       },
