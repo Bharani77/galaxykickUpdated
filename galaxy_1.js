@@ -58,8 +58,7 @@ fsSync.watch('config1.json', (eventType, filename) => {
     if (eventType === 'change') {
         console.log('Config file changed, updating values...');
         updateConfigValues();
-        // Update GM values after config is updated
-        updateGMValues();
+        // Don't call updateGMValues here since it will be handled in WebSocket check
     }
 });
 
@@ -396,6 +395,9 @@ async function setupWebSocketListener() {
             console.log(`[Puppeteer WS Received] Payload: ${payloadData.substring(0, 200)}...`);
 
             try {
+                // Update GM values before checking rivals to ensure latest config
+                await updateGMValues();
+                
                 if (joinPrisonRegex.test(payloadData) || listPrisonRegex.test(payloadData) || prisonRegex.test(payloadData)) {
                     console.log('[Puppeteer] Prison detected in WebSocket message. Triggering prison unlock script.');
                     isPrisonMode = true;
