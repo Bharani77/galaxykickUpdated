@@ -3,18 +3,26 @@ const fs = require('fs').promises;
 const path = require('path');
 const { Buffer } = require('buffer'); // Needed for potential Base64 decoding
 
-// --- Parse Command Line Arguments ---
-const args = process.argv.slice(2);
-const rivalNamesArg = args[0];
-const planetNameArg = args[1]; // New planet name argument
-const recoveryCodeArg = args[2]; // New recovery code argument
+// Read configuration from config1.json
+let config;
+try {
+    config = require('./config1.json');
+} catch (error) {
+    console.error("Error reading config1.json:", error);
+    process.exit(1);
+}
+
+// Set variables from config
+const rivalNamesArg = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
+const planetNameArg = config.planetName;
+const recoveryCodeArg = config.RC;
 const timingParams = {
-    startAttack: parseInt(args[3]) || 0,
-    startIntervalAttack: parseInt(args[4]) || 100,
-    stopAttack: parseInt(args[5]) || 5000,
-    startDefence: parseInt(args[6]) || 0,
-    startDefenceInterval: parseInt(args[7]) || 100,
-    stopDefence: parseInt(args[8]) || 5000
+    startAttack: config.startAttackTime || 0,
+    startIntervalAttack: config.attackIntervalTime || 100,
+    stopAttack: config.stopAttackTime || 5000,
+    startDefence: config.startDefenceTime || 0,
+    startDefenceInterval: config.defenceIntervalTime || 100,
+    stopDefence: config.stopDefenceTime || 5000
 };
 
 // --- Validate Arguments ---
