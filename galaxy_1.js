@@ -15,16 +15,26 @@ function updateConfigValues() {
         rivalNamesArg = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
         planetNameArg = config.planetName;
         recoveryCodeArg = config.RC;
+        
+        // Update timing parameters
         timingParams.startAttack = config.startAttackTime || 0;
         timingParams.startIntervalAttack = config.attackIntervalTime || 100;
         timingParams.stopAttack = config.stopAttackTime || 5000;
         timingParams.startDefence = config.startDefenceTime || 0;
         timingParams.startDefenceInterval = config.defenceIntervalTime || 100;
         timingParams.stopDefence = config.stopDefenceTime || 5000;
-
+        
         console.log("Configuration updated from file:", config);
+        
+        // Reset current attack and defence delays to the new start values
+        // We need to send these values directly to the browser with GM_setValue
+        return {
+            newAttackDelay: timingParams.startAttack,
+            newDefenceDelay: timingParams.startDefence
+        };
     } catch (error) {
         console.error("Error updating config:", error);
+        return null;
     }
 }
 
@@ -54,11 +64,36 @@ async function updateGMValues() {
 }
 
 // Watch for config file changes
-fsSync.watch('config1.json', (eventType, filename) => {
+// Watch for config file changes
+fsSync.watch('config1.json', async (eventType, filename) => {
     if (eventType === 'change') {
         console.log('Config file changed, updating values...');
-        updateConfigValues();
-        // Don't call updateGMValues here since it will be handled in WebSocket check
+        const newDelays = updateConfigValues();
+        
+        if (newDelays && page && !page.isClosed()) {
+            try {
+                // Immediately update the current delay values in the browser
+                await page.evaluate(async (attackDelay, defenceDelay) => {
+                    if (typeof window.GM_setValue !== 'function') {
+                        console.error('[Browser] GM_setValue function not found!');
+                        return;
+                    }
+                    
+                    await window.GM_setValue('CURRENT_ATTACK_DELAY', attackDelay);
+                    await window.GM_setValue('CURRENT_DEFENCE_DELAY', defenceDelay);
+                    
+                    console.log('[Browser] Current delay values reset to config start values:',
+                        { attackDelay, defenceDelay });
+                }, newDelays.newAttackDelay, newDelays.newDefenceDelay);
+                
+                console.log('Reset delay values in browser to new start values:', newDelays);
+            } catch (error) {
+                console.error("Error updating current delay values in browser:", error);
+            }
+        }
+        
+        // Still call updateGMValues to update other parameters
+        await updateGMValues();
     }
 });
 
@@ -395,9 +430,6 @@ async function setupWebSocketListener() {
             console.log(`[Puppeteer WS Received] Payload: ${payloadData.substring(0, 200)}...`);
 
             try {
-                // Update GM values before checking rivals to ensure latest config
-                await updateGMValues();
-                
                 if (joinPrisonRegex.test(payloadData) || listPrisonRegex.test(payloadData) || prisonRegex.test(payloadData)) {
                     console.log('[Puppeteer] Prison detected in WebSocket message. Triggering prison unlock script.');
                     isPrisonMode = true;
