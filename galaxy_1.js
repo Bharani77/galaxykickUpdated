@@ -28,16 +28,33 @@ function updateConfigValues() {
         
         // Reset current attack and defence delays to the new start values
         // We need to send these values directly to the browser with GM_setValue
-        return {
+        const returnValues = {
             newAttackDelay: timingParams.startAttack,
             newDefenceDelay: timingParams.startDefence
         };
+        
+        // Add a non-async immediate reset of values in the browser if possible
+        if (page && !page.isClosed()) {
+            // We'll use Promise handling instead of await since this function isn't async
+            page.evaluate(async (params) => {
+                if (typeof window.GM_setValue === 'function') {
+                    await window.GM_setValue('CURRENT_ATTACK_DELAY', params.startAttack);
+                    await window.GM_setValue('CURRENT_DEFENCE_DELAY', params.startDefence);
+                    console.log('[Browser] Reset delay values to match new config:', params);
+                } else {
+                    console.error('[Browser] GM_setValue not available for reset');
+                }
+            }, timingParams)
+            .then(() => console.log('Reset delay values in browser to match new config'))
+            .catch(error => console.error('Error resetting delay values:', error));
+        }
+        
+        return returnValues;
     } catch (error) {
         console.error("Error updating config:", error);
         return null;
     }
 }
-
 // Initial config read
 let config;
 let rivalNamesArg, planetNameArg, recoveryCodeArg, timingParams = {};
@@ -46,6 +63,10 @@ updateConfigValues();
 // Add this new function to update GM values
 async function updateGMValues() {
     if (!page || page.isClosed()) return;
+    
+    // Re-read the current values from config to ensure freshness
+    const currentRivalNames = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
+    const currentPlanetName = config.planetName;
     
     try {
         await page.evaluate(async (names, planet, params) => {
@@ -57,12 +78,11 @@ async function updateGMValues() {
             await window.GM_setValue('PLANET_NAME', planet);
             await window.GM_setValue('TIMING_PARAMS', JSON.stringify(params));
             console.log('[Browser] Configuration updated via GM_setValue');
-        }, rivalNames, planetName, timingParams);
+        }, currentRivalNames, currentPlanetName, timingParams);
     } catch (error) {
         console.error("Error updating GM values:", error);
     }
 }
-
 // Watch for config file changes
 // Watch for config file changes
 fsSync.watch('config1.json', async (eventType, filename) => {
