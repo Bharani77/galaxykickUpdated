@@ -33,11 +33,33 @@ let config;
 let rivalNamesArg, planetNameArg, recoveryCodeArg, timingParams = {};
 updateConfigValues();
 
+// Add this new function to update GM values
+async function updateGMValues() {
+    if (!page || page.isClosed()) return;
+    
+    try {
+        await page.evaluate(async (names, planet, params) => {
+            if (typeof window.GM_setValue !== 'function') {
+                console.error('[Browser] GM_setValue function not found!');
+                return;
+            }
+            await window.GM_setValue('RIVAL_NAMES', names);
+            await window.GM_setValue('PLANET_NAME', planet);
+            await window.GM_setValue('TIMING_PARAMS', JSON.stringify(params));
+            console.log('[Browser] Configuration updated via GM_setValue');
+        }, rivalNames, planetName, timingParams);
+    } catch (error) {
+        console.error("Error updating GM values:", error);
+    }
+}
+
 // Watch for config file changes
 fsSync.watch('config1.json', (eventType, filename) => {
     if (eventType === 'change') {
         console.log('Config file changed, updating values...');
         updateConfigValues();
+        // Update GM values after config is updated
+        updateGMValues();
     }
 });
 
