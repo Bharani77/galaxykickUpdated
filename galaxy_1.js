@@ -213,7 +213,7 @@ const listPrisonRegex = /353\s*.+?Prison/i;
     try {
         console.log('Launching browser...');
         browser = await puppeteer.launch({
-            headless: false,
+            headless: "new",
             args: [
                 '--start-maximized',
                 '--disable-infobars',
