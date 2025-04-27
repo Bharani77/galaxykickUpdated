@@ -26,34 +26,45 @@ function updateConfigValues() {
         
         console.log("Configuration updated from file:", config);
         
-        // Reset current attack and defence delays to the new start values
-        // We need to send these values directly to the browser with GM_setValue
+        // Return values for browser context update
         const returnValues = {
             newAttackDelay: timingParams.startAttack,
             newDefenceDelay: timingParams.startDefence
         };
         
-        // Add a non-async immediate reset of values in the browser if possible
-        if (page && !page.isClosed()) {
-            // We'll use Promise handling instead of await since this function isn't async
-            page.evaluate(async (params) => {
-                if (typeof window.GM_setValue === 'function') {
-                    await window.GM_setValue('CURRENT_ATTACK_DELAY', params.startAttack);
-                    await window.GM_setValue('CURRENT_DEFENCE_DELAY', params.startDefence);
-                    console.log('[Browser] Reset delay values to match new config:', params);
-                } else {
-                    console.error('[Browser] GM_setValue not available for reset');
-                }
-            }, timingParams)
-            .then(() => console.log('Reset delay values in browser to match new config'))
-            .catch(error => console.error('Error resetting delay values:', error));
-        }
+        // CRUCIAL NEW CODE: Update the rivalNames array with new values
+        // This ensures the WebSocket monitoring uses up-to-date rivals
+        rivalNames = rivalNamesArg.split(',').map(name => name.trim());
+        console.log("Updated rival names array:", rivalNames);
+        
+        // Rebuild regex patterns for updated rival names
+        rebuildRegexPatterns();
         
         return returnValues;
     } catch (error) {
         console.error("Error updating config:", error);
         return null;
     }
+}
+
+function rebuildRegexPatterns() {
+    // Clear existing patterns
+    joinRegexes = [];
+    listRegexes = [];
+    
+    // Rebuild patterns for each rival name
+    rivalNames.forEach((rivalName) => {
+        const escapedRivalName = escapeRegex(rivalName);
+        console.log(`[Setup] Created escaped regex for '${rivalName}': ${escapedRivalName}`);
+        
+        joinRegexes.push(new RegExp(`JOIN\\s+[-\\s\\w]*${escapedRivalName}\\s+\\d+`, 'i')); 
+        listRegexes.push(new RegExp(`353\\s+\\d+.*?@?${escapedRivalName}\\s+\\d+`, 'i'));
+        joinRegexes.push(new RegExp(`JOIN.*?${escapedRivalName}`, 'i'));
+        listRegexes.push(new RegExp(`353.*?${escapedRivalName}`, 'i'));
+    });
+    
+    console.log("[Debug] Rebuilt JOIN regex patterns:");
+    joinRegexes.forEach((regex, i) => console.log(`  [${i}]: ${regex}`));
 }
 // Initial config read
 let config;
@@ -64,21 +75,32 @@ updateConfigValues();
 async function updateGMValues() {
     if (!page || page.isClosed()) return;
     
-    // Re-read the current values from config to ensure freshness
-    const currentRivalNames = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
-    const currentPlanetName = config.planetName;
-    
     try {
+        // Get the latest rivals as a comma-separated string
+        const currentRivalNames = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
+        const currentPlanetName = config.planetName;
+        
         await page.evaluate(async (names, planet, params) => {
             if (typeof window.GM_setValue !== 'function') {
                 console.error('[Browser] GM_setValue function not found!');
                 return;
             }
+            
             await window.GM_setValue('RIVAL_NAMES', names);
             await window.GM_setValue('PLANET_NAME', planet);
             await window.GM_setValue('TIMING_PARAMS', JSON.stringify(params));
-            console.log('[Browser] Configuration updated via GM_setValue');
+            
+            // Reset the current delay values to match the new start values
+            await window.GM_setValue('CURRENT_ATTACK_DELAY', params.startAttack);
+            await window.GM_setValue('CURRENT_DEFENCE_DELAY', params.startDefence);
+            
+            console.log('[Browser] Configuration fully updated via GM_setValue with values:', 
+                { names, planet, params, 
+                  currentAttackDelay: params.startAttack, 
+                  currentDefenceDelay: params.startDefence });
         }, currentRivalNames, currentPlanetName, timingParams);
+        
+        console.log("Successfully updated all GM values in browser context");
     } catch (error) {
         console.error("Error updating GM values:", error);
     }
@@ -88,35 +110,34 @@ async function updateGMValues() {
 fsSync.watch('config1.json', async (eventType, filename) => {
     if (eventType === 'change') {
         console.log('Config file changed, updating values...');
+        
+        // First update the local config values and get new delays
         const newDelays = updateConfigValues();
         
         if (newDelays && page && !page.isClosed()) {
             try {
-                // Immediately update the current delay values in the browser
-                await page.evaluate(async (attackDelay, defenceDelay) => {
-                    if (typeof window.GM_setValue !== 'function') {
-                        console.error('[Browser] GM_setValue function not found!');
-                        return;
-                    }
-                    
-                    await window.GM_setValue('CURRENT_ATTACK_DELAY', attackDelay);
-                    await window.GM_setValue('CURRENT_DEFENCE_DELAY', defenceDelay);
-                    
-                    console.log('[Browser] Current delay values reset to config start values:',
-                        { attackDelay, defenceDelay });
-                }, newDelays.newAttackDelay, newDelays.newDefenceDelay);
+                // Update all values in the browser context
+                await updateGMValues();
                 
-                console.log('Reset delay values in browser to new start values:', newDelays);
+                // Additional step: Force refresh of WebSocket monitoring
+                if (cdpClient) {
+                    console.log("Config changed significantly, restarting WebSocket monitoring...");
+                    // Detach current client
+                    await cdpClient.removeAllListeners();
+                    await cdpClient.detach().catch(e => console.warn("Warning: Error detaching CDP client after config change:", e.message));
+                    cdpClient = null;
+                    
+                    // Setup a new one with fresh config
+                    await setupWebSocketListener();
+                }
+                
+                console.log('Successfully applied all configuration changes');
             } catch (error) {
-                console.error("Error updating current delay values in browser:", error);
+                console.error("Error handling config change:", error);
             }
         }
-        
-        // Still call updateGMValues to update other parameters
-        await updateGMValues();
     }
 });
-
 // Set variables from config
 const rivalNames = rivalNamesArg.split(',');
 const planetName = planetNameArg || ""; // Default to empty string if not provided
@@ -445,14 +466,15 @@ async function setupWebSocketListener() {
             if (response.opcode !== 1) {
                 return;
             }
-
+        
             const payloadData = response.payloadData;
             console.log(`[Puppeteer WS Received] Payload: ${payloadData.substring(0, 200)}...`);
-
+        
             try {
                 if (joinPrisonRegex.test(payloadData) || listPrisonRegex.test(payloadData) || prisonRegex.test(payloadData)) {
                     console.log('[Puppeteer] Prison detected in WebSocket message. Triggering prison unlock script.');
                     isPrisonMode = true;
+                    
                     await page.evaluate(() => {
                         if (typeof window.executePrisonScript === 'function') {
                             console.log('[Browser] Executing prison unlock script');
@@ -475,21 +497,37 @@ async function setupWebSocketListener() {
                     });
                     return;
                 }
-
+        
+                // Debug log current rival names array before checking
+                console.log(`[Debug] Current rival names being checked: ${rivalNames.join(', ')}`);
+                console.log(`[Debug] Current joinRegexes length: ${joinRegexes.length}`);
+        
                 let messageType = null;
                 let detectedRivalName = null;
-
+        
+                // CRITICAL: Make sure rivalNames.length is being used properly here
+                // The issue might be that rivalNames gets stale while the regexes are 
+                // based on the original array length
                 for (let i = 0; i < rivalNames.length; i++) {
                     const rivalName = rivalNames[i];
-                    const joinMatchExact = joinRegexes[i].test(payloadData);
-                    const joinFallbackMatch = joinRegexes[i + rivalNames.length].test(payloadData);
-                    const listMatchExact = listRegexes[i].test(payloadData);
-                    const listFallbackMatch = listRegexes[i + rivalNames.length].test(payloadData);
-
+                    
+                    // Ensure we don't exceed array bounds by checking
+                    const joinIndexExact = i < joinRegexes.length ? i : -1;
+                    const joinIndexFallback = i + rivalNames.length < joinRegexes.length ? i + rivalNames.length : -1;
+                    
+                    const joinMatchExact = joinIndexExact >= 0 ? joinRegexes[joinIndexExact].test(payloadData) : false;
+                    const joinFallbackMatch = joinIndexFallback >= 0 ? joinRegexes[joinIndexFallback].test(payloadData) : false;
+                    
+                    const listIndexExact = i < listRegexes.length ? i : -1;
+                    const listIndexFallback = i + rivalNames.length < listRegexes.length ? i + rivalNames.length : -1;
+                    
+                    const listMatchExact = listIndexExact >= 0 ? listRegexes[listIndexExact].test(payloadData) : false;
+                    const listFallbackMatch = listIndexFallback >= 0 ? listRegexes[listIndexFallback].test(payloadData) : false;
+        
                     console.log(`[Debug] Testing rival '${rivalName}' against: ${payloadData.substring(0, 50)}...`);
                     console.log(`[Debug] JOIN exact match: ${joinMatchExact}`);
                     console.log(`[Debug] JOIN fallback match: ${joinFallbackMatch}`);
-
+        
                     if (joinMatchExact || joinFallbackMatch) {
                         console.log(`[Debug] SUCCESS! JOIN match found for '${rivalName}'`);
                         messageType = 'JOIN';
@@ -502,7 +540,7 @@ async function setupWebSocketListener() {
                         break;
                     }
                 }
-
+        
                 if (messageType && detectedRivalName) {
                     console.log(`[Puppeteer] Rival '${detectedRivalName}' detected in WebSocket message (Type: ${messageType}). Triggering Tampermonkey.`);
                     isTampermonkeyRunning = true;
@@ -528,15 +566,14 @@ async function setupWebSocketListener() {
                         isTampermonkeyRunning = false;
                     });
                 }
-
+        
                 // Pass payloadData to checkCurrentPlanetAndAct
                 await checkCurrentPlanetAndAct(payloadData);
-
+        
             } catch (parseOrCheckError) {
                 console.warn(`[Puppeteer] Error processing WebSocket message: ${parseOrCheckError.message}. Payload: ${payloadData.substring(0, 100)}...`);
             }
         };
-
         cdpClient.on('Network.webSocketFrameReceived', webSocketFrameReceivedListener);
 
         cdpClient.on('error', (error) => {
