@@ -4,6 +4,10 @@ const fsSync = require('fs');  // For file watching
 const path = require('path');
 const { Buffer } = require('buffer'); // Needed for potential Base64 decoding
 
+let rivalNames = [];
+let planetName = "";
+let joinRegexes = [];
+let listRegexes = [];
 // Function to update config values
 function updateConfigValues() {
     try {
@@ -37,6 +41,9 @@ function updateConfigValues() {
         rivalNames = rivalNamesArg.split(',').map(name => name.trim());
         console.log("Updated rival names array:", rivalNames);
         
+        // Update the planetName too
+        planetName = planetNameArg || "";
+        
         // Rebuild regex patterns for updated rival names
         rebuildRegexPatterns();
         
@@ -46,7 +53,6 @@ function updateConfigValues() {
         return null;
     }
 }
-
 function rebuildRegexPatterns() {
     // Clear existing patterns
     joinRegexes = [];
@@ -68,6 +74,7 @@ function rebuildRegexPatterns() {
 }
 // Initial config read
 let config;
+
 let rivalNamesArg, planetNameArg, recoveryCodeArg, timingParams = {};
 updateConfigValues();
 
@@ -139,8 +146,12 @@ fsSync.watch('config1.json', async (eventType, filename) => {
     }
 });
 // Set variables from config
-const rivalNames = rivalNamesArg.split(',');
-const planetName = planetNameArg || ""; // Default to empty string if not provided
+if (rivalNames.length === 0) {
+    rivalNames = rivalNamesArg.split(',').map(name => name.trim());
+}
+if (!planetName) {
+    planetName = planetNameArg || "";
+}
 
 // --- Configuration ---
 const scriptPath = path.join(__dirname, 'login.user_1.js'); // Your Tampermonkey script path
@@ -171,8 +182,7 @@ function escapeRegex(str) {
 }
 
 // Create regex patterns for each rival name
-const joinRegexes = [];
-const listRegexes = [];
+
 rivalNames.forEach((rivalName) => {
     const escapedRivalName = escapeRegex(rivalName);
     console.log(`[Setup] Created escaped regex for '${rivalName}': ${escapedRivalName}`);
@@ -203,7 +213,7 @@ const listPrisonRegex = /353\s*.+?Prison/i;
     try {
         console.log('Launching browser...');
         browser = await puppeteer.launch({
-            headless: "new",
+            headless: false,
             args: [
                 '--start-maximized',
                 '--disable-infobars',
@@ -348,7 +358,7 @@ await page.evaluateOnNewDocument((userScriptContent, prisonScriptContent) => {
 
 // After page load, verify script execution and function availability
 console.log('Navigating to target site...');
-await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 90000 });
+await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
 // After navigation completes
 console.log('After navigation, verifying script execution...');
