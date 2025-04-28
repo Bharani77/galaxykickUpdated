@@ -242,7 +242,7 @@ class GalaxyAutomation {
     async launchBrowser() {
         console.log('Launching browser...');
         this.browser = await puppeteer.launch({
-            headless: false,
+            headless: "new",
             args: [
                 '--start-maximized',
                 '--disable-infobars',
