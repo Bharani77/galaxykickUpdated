@@ -376,7 +376,14 @@ const listPrisonRegex = /353\s*.+?Prison/i;
 
         console.log('Navigation complete.');
         await delay(3000);
-        await page.click('.mdc-button--black-secondary > .mdc-button__label', { visible: true });
+        await page.evaluate(() => {
+            const button = document.querySelector('.mdc-button--black-secondary');
+            if (button) {
+                button.click();
+                return true;
+            }
+            return false;
+        });
         await page.click('input[name="recoveryCode"]', { visible: true });
         await page.type('input[name="recoveryCode"]', recoveryCode, { delay: 50 });
         console.log('Waiting for final login button...');
