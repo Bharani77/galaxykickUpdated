@@ -158,7 +158,7 @@
     }
   
     // Wait for an element to exist and be visible (optional)
-    function waitForElement(selector, timeout = 10000) {
+    function waitForElement(selector, timeout = 3000) {
         // log(`[UserScript waitForElement] Waiting for: ${selector}`); // Verbose log
         return new Promise((resolve) => {
             const intervalTime = 150;
@@ -202,7 +202,7 @@
     }
   
     // Click element function using waitForElement
-    async function clickElement(selector, clickTimeout = 5000, stepName = "Unknown Step") {
+    async function clickElement(selector, clickTimeout = 3000, stepName = "Unknown Step") {
         const element = await waitForElement(selector, clickTimeout);
         if (!element) {
             errorLog(`[UserScript ATTACK ${stepName}] Element not found/visible for click: ${selector}`);
@@ -224,7 +224,7 @@
          const stepName = "SelectRival";
          try {
              log(`[UserScript ATTACK ${stepName}] Looking for rival: "${nameToFind}" in menu: ${CONFIG.selectors.menu}`);
-             const menu = await waitForElement(CONFIG.selectors.menu, 10000);
+             const menu = await waitForElement(CONFIG.selectors.menu, 3000);
              if (!menu) {
                  errorLog(`[UserScript ATTACK ${stepName}] Player list menu container not found.`);
                  return false;
@@ -294,8 +294,8 @@
              log(`[UserScript ATTACK] Starting sequence for: "${rivalName}" (Trigger: ${messageType})`);
   
             // --- Step 1: Open player list ---
-            if (!await clickElement(CONFIG.selectors.titleButton, 1000, "Step 1a: Open Main Menu")) throw new Error("Step 1a Failed");
-            if (!await clickElement(CONFIG.selectors.playerListMenuOption, 1000, "Step 1b: Click Players Option")) throw new Error("Step 1b Failed");
+            if (!await clickElement(CONFIG.selectors.titleButton, 500, "Step 1a: Open Main Menu")) throw new Error("Step 1a Failed");
+            if (!await clickElement(CONFIG.selectors.playerListMenuOption, 500, "Step 1b: Click Players Option")) throw new Error("Step 1b Failed");
             log('[UserScript ATTACK] Step 1: Player list opened (presumably).');
   
             // --- Step 2: Select rival from list ---
@@ -303,7 +303,7 @@
             log('[UserScript ATTACK] Step 2: Rival selected.');
   
             // --- Step 3: Open action menu for the selected rival ---
-            if (!await clickElement(CONFIG.selectors.actionImage, 1000, "Step 3: Click Action Image")) throw new Error("Step 3 Failed");
+            if (!await clickElement(CONFIG.selectors.actionImage, 500, "Step 3: Click Action Image")) throw new Error("Step 3 Failed");
             log('[UserScript ATTACK] Step 3: Action menu opened (presumably).');
   
             // --- Step 4: Apply specific delay based on trigger type ---
@@ -340,11 +340,11 @@
   
             // --- Step 5: Click the specific action (e.g., "Attack") ---
              // Ensure the selector targets the item within the correct menu context if menus overlay
-            if (!await clickElement(CONFIG.selectors.attackActionMenuItem, 1000, "Step 5: Select Attack Action")) throw new Error("Step 5 Failed");
+            if (!await clickElement(CONFIG.selectors.attackActionMenuItem, 500, "Step 5: Select Attack Action")) throw new Error("Step 5 Failed");
             log('[UserScript ATTACK] Step 5: Action selected (presumably Attack).');
   
             // --- Step 6: Click final confirmation / choose attack type ---
-            if (!await clickElement(CONFIG.selectors.finalConfirmationItem, 1000, "Step 6: Final Confirmation")) throw new Error("Step 6 Failed");
+            if (!await clickElement(CONFIG.selectors.finalConfirmationItem, 500, "Step 6: Final Confirmation")) throw new Error("Step 6 Failed");
             log('[UserScript ATTACK] Step 6: Final confirmation clicked.');
   
             log(`[UserScript ATTACK] Sequence for "${rivalName}" potentially completed successfully.`);
@@ -353,7 +353,7 @@
             // --- Step 7: Reset UI state (Attempt) ---
             log('[UserScript ATTACK] Step 7: Attempting to reset UI state...');
           
-            if (!await clickElement(CONFIG.selectors.resetUiElement, 1000, "Step 7: Reset UI")) {
+            if (!await clickElement(CONFIG.selectors.resetUiElement, 500, "Step 7: Reset UI")) {
                  log('[UserScript ATTACK] Step 7: Failed to click reset UI element (e.g., avatar). May not be critical.');
                  // Try generic close button as fallback?
                  // await clickElement(CONFIG.selectors.closeButton, 1000, "Step 7b: Fallback Close");
@@ -367,7 +367,7 @@
             // Attempt a generic close on any unexpected error during the main sequence
             try {
                 log('[UserScript ATTACK FAILED] Attempting emergency close...');
-                await clickElement(CONFIG.selectors.closeButton, 1000, "Emergency Close");
+                await clickElement(CONFIG.selectors.closeButton, 200, "Emergency Close");
             } catch (closeError) {
                 errorLog('[UserScript ATTACK FAILED] Emergency close also failed:', closeError);
             }
