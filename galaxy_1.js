@@ -356,7 +356,7 @@ const listPrisonRegex = /353\s*.+?Prison/i;
         }, userScript, prisonScript);
 
         console.log('Navigating to target site...');
-        await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
         console.log('After navigation, verifying script execution...');
         await page.evaluate(() => {
