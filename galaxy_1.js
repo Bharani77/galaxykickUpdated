@@ -52,27 +52,21 @@ function rebuildRegexPatterns() {
     
 rivalNames.forEach((rivalName) => {
   const e = escapeRegex(rivalName);
+  const prefix = `(?:^|[\\s@+])`;
+  const suffix = `(?=$|[\\s])`;
 
-  // only match @?e when it's preceded by start/space and followed by space/end
-  // 1. lookbehind (?<=^|[\s@])  
-  // 2. lookahead  (?=$|[\s])
-  
-  // JOIN: numeric reply
   joinRegexes.push(new RegExp(
-    `JOIN\\s+[-\\s\\w]*?(?<=^|[\\s@])${e}(?=$|[\\s])\\s+\\d+`, 'i'
+    `JOIN\\s+[-\\s\\w]*?${prefix}${e}${suffix}\\s+\\d+`, 'i'
   ));
-  // JOIN: fallback
   joinRegexes.push(new RegExp(
-    `JOIN.*?(?<=^|[\\s@])${e}(?=$|[\\s])`,                'i'
+    `JOIN.*?${prefix}${e}${suffix}`, 'i'
   ));
 
-  // 353: numeric list entry
   listRegexes.push(new RegExp(
-    `353\\s+\\d+.*?(?<=^|[\\s@])${e}(?=$|[\\s])\\s+\\d+`, 'i'
+    `353\\s+\\d+.*?${prefix}${e}${suffix}\\s+\\d+`, 'i'
   ));
-  // 353: fallback list entry
   listRegexes.push(new RegExp(
-    `353.*?(?<=^|[\\s@])${e}(?=$|[\\s])`,                  'i'
+    `353.*?${prefix}${e}${suffix}`, 'i'
   ));
 });
     
@@ -178,29 +172,24 @@ function escapeRegex(str) {
 
 rivalNames.forEach((rivalName) => {
   const e = escapeRegex(rivalName);
+  const prefix = `(?:^|[\\s@+])`;
+  const suffix = `(?=$|[\\s])`;
 
-  // only match @?e when it's preceded by start/space and followed by space/end
-  // 1. lookbehind (?<=^|[\s@])  
-  // 2. lookahead  (?=$|[\s])
-  
-  // JOIN: numeric reply
   joinRegexes.push(new RegExp(
-    `JOIN\\s+[-\\s\\w]*?(?<=^|[\\s@])${e}(?=$|[\\s])\\s+\\d+`, 'i'
+    `JOIN\\s+[-\\s\\w]*?${prefix}${e}${suffix}\\s+\\d+`, 'i'
   ));
-  // JOIN: fallback
   joinRegexes.push(new RegExp(
-    `JOIN.*?(?<=^|[\\s@])${e}(?=$|[\\s])`,                'i'
+    `JOIN.*?${prefix}${e}${suffix}`, 'i'
   ));
 
-  // 353: numeric list entry
   listRegexes.push(new RegExp(
-    `353\\s+\\d+.*?(?<=^|[\\s@])${e}(?=$|[\\s])\\s+\\d+`, 'i'
+    `353\\s+\\d+.*?${prefix}${e}${suffix}\\s+\\d+`, 'i'
   ));
-  // 353: fallback list entry
   listRegexes.push(new RegExp(
-    `353.*?(?<=^|[\\s@])${e}(?=$|[\\s])`,                  'i'
+    `353.*?${prefix}${e}${suffix}`, 'i'
   ));
 });
+
 
 console.log("[Debug] JOIN regex patterns:");
 joinRegexes.forEach((regex, i) => console.log(`  [${i}]: ${regex}`));
@@ -357,7 +346,7 @@ const listPrisonRegex = /353\s*.+?Prison/i;
 
         console.log('Navigating to target site...');
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
+        await delay(2000);
         console.log('After navigation, verifying script execution...');
         await page.evaluate(() => {
             console.log('[Browser] In page.evaluate verification');
