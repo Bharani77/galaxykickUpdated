@@ -464,7 +464,7 @@
             log('[UserScript ATTACK] Step 5: Action selected (presumably Attack).');
   
             // --- Step 6: Click final confirmation / choose attack type ---
-            if (!await clickElement(CONFIG.selectors.finalConfirmationItem, 200, "Step 6: Final Confirmation")) throw new Error("Step 6 Failed");
+            if (!await clickElementXPath("//a[contains(.,'Exit')]", 200, "Step 6: Final Confirmation")) throw new Error("Step 6 Failed");
             log('[UserScript ATTACK] Step 6: Final confirmation clicked.');
   
             log(`[UserScript ATTACK] Sequence for "${rivalName}" potentially completed successfully.`);
