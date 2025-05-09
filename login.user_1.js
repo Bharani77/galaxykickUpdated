@@ -34,8 +34,6 @@
             actionImage: ".planet-bar__button__action > img", // Button on player profile?
             playerListMenuOption: ".-list > .mdc-list-item:nth-child(3) > .mdc-list-item__text", // "Players" option in main menu?
             attackActionMenuItem: ".mdc-menu .mdc-list-item:last-child > .mdc-list-item__text",
-            // "Attack" option in action menu? CHECK NESTING
-            finalConfirmationItem: ".mdc-list-item:nth-child(18)", // Final attack type / confirmation?
             resetUiElement: ".start__user:nth-child(1) > .start__user__avatar" // User's own avatar to reset UI?
         },
         // These timing params will be overwritten by values from GM_getValue
@@ -156,6 +154,128 @@
     function delay(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
+
+    function waitForElementXPath(xpathExpression, timeout = 1000) {
+        return new Promise((resolve) => {
+            const intervalTime = 150;
+            let elapsedTime = 0;
+    
+            const checkElement = () => {
+                const result = document.evaluate(
+                    xpathExpression,
+                    document,
+                    null,
+                    XPathResult.FIRST_ORDERED_NODE_TYPE,
+                    null
+                );
+                const el = result.singleNodeValue;
+                
+                // Basic visibility check
+                const isVisible = el && el.offsetParent !== null && 
+                    window.getComputedStyle(el).visibility !== 'hidden' && 
+                    window.getComputedStyle(el).display !== 'none';
+    
+                if (isVisible) {
+                    clearInterval(interval);
+                    clearTimeout(timer);
+                    resolve(el);
+                } else {
+                    elapsedTime += intervalTime;
+                    if (elapsedTime >= timeout) {
+                        clearInterval(interval);
+                        resolve(null); // Resolve with null on timeout
+                    }
+                }
+            };
+    
+            // Check immediately
+            const initialResult = document.evaluate(
+                xpathExpression,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+            );
+            const initialEl = initialResult.singleNodeValue;
+            const initialVisible = initialEl && initialEl.offsetParent !== null && 
+                window.getComputedStyle(initialEl).visibility !== 'hidden' && 
+                window.getComputedStyle(initialEl).display !== 'none';
+            
+            if(initialVisible) {
+                return resolve(initialEl);
+            }
+    
+            const interval = setInterval(checkElement, intervalTime);
+            const timer = setTimeout(() => {
+                clearInterval(interval);
+                resolve(null); // Ensure resolution on timeout
+            }, timeout);
+        });
+    }
+    
+    // New function to click an element using XPath
+    async function clickElementXPath(xpathExpression, clickTimeout = 1000, stepName = "Unknown Step") {
+        const element = await waitForElementXPath(xpathExpression, clickTimeout);
+        if (!element) {
+            errorLog(`[UserScript ATTACK ${stepName}] XPath element not found/visible for click: ${xpathExpression}`);
+            return false; // Indicate failure
+        }
+        try {
+            element.click();
+            log(`[UserScript ATTACK ${stepName}] Clicked XPath: ${xpathExpression}`);
+            await delay(CONFIG.actionDelay); // Use configured delay after click
+            return true; // Indicate success
+        } catch (error) {
+            errorLog(`[UserScript ATTACK ${stepName}] Failed to click XPath ${xpathExpression}: ${error.message}`);
+            return false; // Indicate failure
+        }
+    }
+      
+        // Wait for an element to exist and be visible (optional)
+        function waitForElement(selector, timeout = 1000) {
+            // log(`[UserScript waitForElement] Waiting for: ${selector}`); // Verbose log
+            return new Promise((resolve) => {
+                const intervalTime = 150;
+                let elapsedTime = 0;
+      
+                const checkElement = () => {
+                    const el = document.querySelector(selector);
+                    // Basic visibility check (might need refinement depending on CSS)
+                    const isVisible = el && el.offsetParent !== null && window.getComputedStyle(el).visibility !== 'hidden' && window.getComputedStyle(el).display !== 'none';
+      
+                    if (isVisible) {
+                        // log(`[UserScript waitForElement] Found: ${selector}`);
+                        clearInterval(interval);
+                        clearTimeout(timer);
+                        resolve(el);
+                    } else {
+                        elapsedTime += intervalTime;
+                        if (elapsedTime >= timeout) {
+                            // log(`[UserScript waitForElement] Timeout waiting for: ${selector}`);
+                            clearInterval(interval);
+                            resolve(null); // Resolve with null on timeout
+                        }
+                    }
+                };
+      
+                // Check immediately
+                 const initialEl = document.querySelector(selector);
+                 const initialVisible = initialEl && initialEl.offsetParent !== null && window.getComputedStyle(initialEl).visibility !== 'hidden' && window.getComputedStyle(initialEl).display !== 'none';
+                 if(initialVisible) {
+                     // log(`[UserScript waitForElement] Found immediately: ${selector}`);
+                     return resolve(initialEl);
+                 }
+      
+                const interval = setInterval(checkElement, intervalTime);
+                const timer = setTimeout(() => {
+                     // log(`[UserScript waitForElement] Timeout fallback for: ${selector}`);
+                     clearInterval(interval);
+                     resolve(null); // Ensure resolution on timeout
+                }, timeout);
+            });
+        }
+      
+    
   
     // Wait for an element to exist and be visible (optional)
     function waitForElement(selector, timeout = 1000) {
