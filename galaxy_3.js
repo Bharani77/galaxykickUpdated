@@ -1,629 +1,802 @@
 const WebSocket = require('ws');
-const fs = require('fs');
-const { exec } = require('child_process');
+const fs = require('fs').promises;
+const fsSync = require('fs');
+const CryptoJS = require('crypto-js');
 
-// Add these utility functions near the top of the file
-const performance = require('perf_hooks').performance;
+// Configuration
+let config;
+let rivalNames = [];
+let recoveryCode;
+let userMap = {}; // Map of user names to IDs
+let reconnectAttempt = 0;
 
-function formatTiming(ms) {
-    return `${ms.toFixed(2)}ms`;
-}
+// Connection pool settings
+const MAX_POOL_SIZE = 20; // Increased from 5 to 20 as requested
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_BACKOFF_BASE = 100; // Start with 100ms backoff
+const connectionPool = [];
+let activeConnection = null;
+let poolWarmupInProgress = false;
 
-let socket;
-let isReconnecting = false;
-let flag = 0;
-let count = 0;
-let tempTime1 = 0;
-
-// ML Model state
-class EnhancedMLTimingModel {
-    constructor() {
-        this.successfulTimings = [];
-        this.failedTimings = [];
-        this.maxHistorySize = 100;
-        this.binSize = 5; // 5ms granularity for more precise timing
-        this.successRatesByTiming = new Map();
-        this.recentResults = []; // Store recent results for adaptive learning
-        this.maxRecentSize = 20;
-        
-        // Parameters for weighted moving average
-        this.alpha = 0.3; // Weight for new observations
-        this.currentEstimate = null;
-        
-        this.loadModel();
-    }
-
-    loadModel() {
-        try {
-            if (fs.existsSync('ml_model_state.json')) {
-                const data = JSON.parse(fs.readFileSync('ml_model_state.json', 'utf8'));
-                this.successfulTimings = data.successfulTimings || [];
-                this.failedTimings = data.failedTimings || [];
-                this.successRatesByTiming = new Map(Object.entries(data.successRatesByTiming || {}));
-                this.recentResults = data.recentResults || [];
-                this.currentEstimate = data.currentEstimate;
-            }
-        } catch (error) {
-            console.error('Error loading ML model:', error);
-        }
-    }
-
-    saveModel() {
-        try {
-            const data = {
-                successfulTimings: this.successfulTimings,
-                failedTimings: this.failedTimings,
-                successRatesByTiming: Object.fromEntries(this.successRatesByTiming),
-                recentResults: this.recentResults,
-                currentEstimate: this.currentEstimate
-            };
-            fs.writeFileSync('ml_model_state.json', JSON.stringify(data));
-        } catch (error) {
-            console.error('Error saving ML model:', error);
-        }
-    }
-
-        getEstimatedLatency() {
-        // Calculate average latency from recent successful results
-        const recentSuccesses = this.recentResults
-            .filter(result => result.success)
-            .map(result => result.executionTime);
-        
-        if (recentSuccesses.length === 0) return 0;
-        
-        return recentSuccesses.reduce((sum, time) => sum + time, 0) / recentSuccesses.length;
-    }
-
-    getBinnedTiming(timing) {
-        return Math.round(timing / this.binSize) * this.binSize;
-    }
-
-    updateSuccessRate(timing, success) {
-        const binnedTiming = this.getBinnedTiming(timing);
-        const current = this.successRatesByTiming.get(binnedTiming) || { successes: 0, attempts: 0 };
-        current.attempts++;
-        if (success) current.successes++;
-        this.successRatesByTiming.set(binnedTiming, current);
-    }
-
-    findBestTimingInRange(attackTime, defenseTime) {
-        const validTimings = [];
-        
-        // Create ranges of timings to test
-        for (let timing = attackTime; timing <= defenseTime; timing += this.binSize) {
-            const binnedTiming = this.getBinnedTiming(timing);
-            const stats = this.successRatesByTiming.get(binnedTiming) || { successes: 0, attempts: 0 };
-            
-            if (stats.attempts > 0) {
-                const successRate = stats.successes / stats.attempts;
-                const confidence = 1 - (1 / Math.sqrt(stats.attempts + 1));
-                const score = successRate * confidence;
-                
-                validTimings.push({
-                    timing: binnedTiming,
-                    score,
-                    successRate,
-                    attempts: stats.attempts
-                });
-            }
-        }
-
-        // Sort by score and get the best timing
-        validTimings.sort((a, b) => b.score - a.score);
-        return validTimings[0]?.timing;
-    }
-
-    getAdaptiveTiming(attackTime, defenseTime) {
-        const range = defenseTime - attackTime;
-        const midPoint = attackTime + (range / 2);
-        
-        // If we have recent successful results, use them to adjust the timing
-        if (this.recentResults.length > 0) {
-            const recentSuccesses = this.recentResults
-                .filter(result => result.success)
-                .map(result => result.timing);
-            
-            if (recentSuccesses.length > 0) {
-                // Calculate weighted average of recent successful timings
-                const weights = recentSuccesses.map((_, i) => 
-                    Math.exp(-i / recentSuccesses.length));
-                const totalWeight = weights.reduce((a, b) => a + b, 0);
-                
-                const weightedSum = recentSuccesses.reduce((sum, timing, i) => 
-                    sum + (timing * weights[i]), 0);
-                
-                return weightedSum / totalWeight;
-            }
-        }
-        
-        // If no recent successes, start from the middle and gradually explore
-        return midPoint;
-    }
-
-    predictTiming(attackTime, defenseTime) {
-        console.log(`Predicting timing between ${attackTime}ms and ${defenseTime}ms`);
-        
-        // First, check if we have a good timing from historical data
-        const bestHistoricalTiming = this.findBestTimingInRange(attackTime, defenseTime);
-        
-        // Get adaptive timing based on recent results
-        const adaptiveTiming = this.getAdaptiveTiming(attackTime, defenseTime);
-        
-        // If we have a good historical timing, use it most of the time
-        if (bestHistoricalTiming && Math.random() < 0.7) {
-            console.log(`Using historical best timing: ${bestHistoricalTiming}ms`);
-            return bestHistoricalTiming;
-        }
-        
-        // Use adaptive timing with small random adjustment
-        const range = defenseTime - attackTime;
-        const randomAdjustment = (Math.random() - 0.5) * (range * 0.1); // ±5% of range
-        const finalTiming = Math.min(defenseTime, 
-                                   Math.max(attackTime, 
-                                          adaptiveTiming + randomAdjustment));
-        
-        console.log(`Using adaptive timing: ${finalTiming}ms`);
-        return finalTiming;
-    }
-
-    recordResult(timing, success, executionTime) {
-        const binnedTiming = this.getBinnedTiming(timing);
-        
-        // Update success rates
-        this.updateSuccessRate(binnedTiming, success);
-        
-        // Update timing history
-        if (success) {
-            this.successfulTimings.push(binnedTiming);
-            if (this.successfulTimings.length > this.maxHistorySize) {
-                this.successfulTimings.shift();
-            }
-        } else {
-            this.failedTimings.push(binnedTiming);
-            if (this.failedTimings.length > this.maxHistorySize) {
-                this.failedTimings.shift();
-            }
-        }
-
-        // Update recent results
-        this.recentResults.push({ timing: binnedTiming, success, executionTime });
-        if (this.recentResults.length > this.maxRecentSize) {
-            this.recentResults.shift();
-        }
-
-        // Update weighted moving average estimate
-        if (success) {
-            if (this.currentEstimate === null) {
-                this.currentEstimate = timing;
-            } else {
-                this.currentEstimate = (this.alpha * timing) + 
-                                     ((1 - this.alpha) * this.currentEstimate);
-            }
-        }
-
-        this.saveModel();
-        
-        // Log success rate for this timing
-        const stats = this.successRatesByTiming.get(binnedTiming);
-        const successRate = stats ? (stats.successes / stats.attempts * 100).toFixed(1) : 0;
-        console.log(`Timing ${binnedTiming}ms - Success Rate: ${successRate}%`);
-    }
-
-    getSuccessRate() {
-        const totalAttempts = this.successfulTimings.length + this.failedTimings.length;
-        return totalAttempts > 0 ? this.successfulTimings.length / totalAttempts : 0;
-    }
-}
-
-
-const mlModel = new EnhancedMLTimingModel();
-
-
-let config = {
-    RC: '',
-    AttackTime: 0,
-    DefenceTime: 0,
-    DefenceTime1: 0,
-    planetName: '',
-    interval: 0,
-    rival: []
+// Connection states
+const CONNECTION_STATES = {
+    CLOSED: 'closed',
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+    HASH_RECEIVED: 'hash_received',
+    AUTHENTICATED: 'authenticated',
+    READY: 'ready'
 };
 
-function loadConfig() {
+// Attack and defense timing variables
+let currentAttackTime;
+let currentDefenceTime;
+let monitoringMode = true; // Flag to indicate if the bot should stay connected and monitor
+
+function updateConfigValues() {
     try {
-        const data = fs.readFileSync('config3.json', 'utf8');
-        Object.assign(config, JSON.parse(data));
-        config.DefenceTime1 = config.DefenceTime;
-        tempTime1 = config.AttackTime;
+        delete require.cache[require.resolve('./config1.json')];
+        config = require('./config1.json');
+        rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
+        recoveryCode = config.RC;
         
-        config.rival = Array.isArray(config.rival) ? config.rival : [config.rival];
-        config.rival = config.rival.map(r => r.trim());
+        // Reset timing values to their initial state
+        currentAttackTime = config.startAttackTime;
+        currentDefenceTime = config.startDefenceTime;
         
-        console.log('Config updated:', config);
-    } catch (err) {
-        console.error('Error reading config file:', err);
+        console.log("Configuration updated:", { 
+            rivalNames, 
+            recoveryCode,
+            attackSettings: {
+                start: config.startAttackTime,
+                stop: config.stopAttackTime,
+                interval: config.attackIntervalTime,
+                current: currentAttackTime
+            },
+            defenceSettings: {
+                start: config.startDefenceTime,
+                stop: config.stopDefenceTime,
+                interval: config.defenceIntervalTime,
+                current: currentDefenceTime
+            }
+        });
+    } catch (error) {
+        console.error("Error updating config:", error);
     }
 }
 
-loadConfig();
+// Initial config load
+updateConfigValues();
 
-fs.watch('config3.json', (eventType) => {
+// Watch config file for changes
+fsSync.watch('config1.json', (eventType) => {
     if (eventType === 'change') {
-        console.log('Config file changed. Reloading...');
-        loadConfig();
+        console.log('Config file changed, updating values...');
+        updateConfigValues();
     }
 });
 
-async function handleError(error) {
-    console.error("An error occurred:", error);
-    try {
-        await actions.reloadPage();
-    } catch (reloadError) {
-        console.error("Failed to reload page:", reloadError);
-    }
+function genHash(code) {
+    const hash = CryptoJS.MD5(code);
+    let str = hash.toString(CryptoJS.enc.Hex);
+    str = str.split("").reverse().join("0").substr(5, 10);
+    return str;
 }
 
-function setupWebSocket() {
-    try {
-        socket = new WebSocket('ws://localhost:8082');
-
-        socket.onopen = async function() {
-            console.log(isReconnecting ? "Reconnection successful" : "Connected to WebSocket server");
-            if (!isReconnecting) {
-                await initialConnection();
-            }
-            isReconnecting = false;
-        };
-
-        socket.onclose = function() {
-            if (!isReconnecting) {
-                console.log("WebSocket connection closed.");
-                handleError("Error");
-                process.exit(1);
-            }
-        };
-
-        socket.onerror = function(error) {
-            console.error("WebSocket Error:", error);
-            handleError(error);
-        };
-    } catch(error) {
-        handleError(error);
-    }
-}
-
-async function sendMessage(message) {
-    if (socket.readyState !== WebSocket.OPEN) {
-        throw new Error(`WebSocket is not open. Current state: ${socket.readyState}`);
-    }
-
-    console.log("Sending message:", message);
-    socket.send(JSON.stringify(message));
-
-    return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            reject(new Error('Timeout waiting for server response'));
-        }, 10000);
-
-        const messageHandler = (event) => {
-            const response = JSON.parse(event.data);
-            if (response.action !== message.action) return;
-
-            clearTimeout(timeout);
-            socket.removeEventListener('message', messageHandler);
-            
-            if (response.status === 'success') {
-                resolve(response);
+function createConnection() {
+    const conn = {
+        socket: null,
+        state: CONNECTION_STATES.CLOSED,
+        hash: null,
+        botId: null,
+        lastUsed: Date.now(),
+        authenticating: false,
+        initPromise: null,
+        reconnectAttempt: 0,
+        createdAt: Date.now(),
+        connectionTimeout: null,
+        registrationData: null,
+        
+        send: function(str) {
+            if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+                this.socket.send(str + "\r\n");
+                console.log(`Sent [${this.botId || 'connecting'}]: ${str}`);
+                this.lastUsed = Date.now();
+                return true;
             } else {
-                reject(new Error(response.message));
+                console.log(`Cannot send [${this.botId || 'connecting'}]: Socket not open (state: ${this.state})`);
+                return false;
             }
-        };
+        },
+        
+        initialize: function(stopAtHash = false) {
+            if (this.initPromise) {
+                return this.initPromise;
+            }
+            
+            this.initPromise = new Promise((resolve, reject) => {
+                try {
+                    if (this.socket) {
+                        this.cleanup();
+                    }
+                    
+                    this.state = CONNECTION_STATES.CONNECTING;
+                    this.authenticating = true;
+                    console.log(`Initializing new connection (stopAtHash: ${stopAtHash})...`);
+                    
+                    this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", {
+                        rejectUnauthorized: false,
+                        handshakeTimeout: 3000 // Reduced timeout
+                    });
+                    
+                    this.connectionTimeout = setTimeout(() => {
+                        console.log("Connection initialization timeout");
+                        this.authenticating = false;
+                        this.cleanup();
+                        reject(new Error("Connection initialization timeout"));
+                    }, 5000); // Reduced to 5 seconds
+                    
+                    this.socket.on('open', () => {
+                        this.state = CONNECTION_STATES.CONNECTED;
+                        console.log("WebSocket connected, initializing identity");
+                        this.send(":ru IDENT 352 -2 4030 1 2 :GALA");
+                    });
+                    
+                    this.socket.on('message', (data) => {
+                        const message = data.toString().trim();
+                        
+                        if (stopAtHash && this.state === CONNECTION_STATES.HASH_RECEIVED) {
+                            console.log(`Warm pool connection [${this.botId || 'connecting'}] received message but stopping at hash: ${message}`);
+                            if (message.startsWith("REGISTER")) {
+                                console.log("Storing registration data for later activation");
+                                this.registrationData = message;
+                                clearTimeout(this.connectionTimeout);
+                                this.authenticating = false;
+                                resolve(this);
+                                return;
+                            }
+                        }
+                        
+                        this.handleMessage(message, resolve, reject, stopAtHash);
+                    });
+                    
+                    this.socket.on('close', () => {
+                        console.log(`WebSocket [${this.botId || 'connecting'}] closed (state: ${this.state})`);
+                        if (this.authenticating) {
+                            this.authenticating = false;
+                            clearTimeout(this.connectionTimeout);
+                            reject(new Error("Connection closed during authentication"));
+                        }
+                        this.state = CONNECTION_STATES.CLOSED;
+                        const index = connectionPool.indexOf(this);
+                        if (index !== -1) {
+                            connectionPool.splice(index, 1);
+                        }
+                        if (this === activeConnection) {
+                            console.log("Active connection closed, getting new connection immediately");
+                            activeConnection = null;
+                            Promise.resolve().then(() => {
+                                return getConnection(true).catch(err => {
+                                    console.error("Failed to get new connection after close:", err);
+                                    return tryReconnectWithBackoff();
+                                });
+                            });
+                        }
+                    });
+                    
+                    this.socket.on('error', (error) => {
+                        console.error(`WebSocket [${this.botId || 'connecting'}] error:`, error.message || error);
+                        if (this.authenticating) {
+                            this.authenticating = false;
+                            clearTimeout(this.connectionTimeout);
+                            reject(error);
+                        }
+                    });
+                } catch (err) {
+                    console.error("Error during connection initialization:", err);
+                    clearTimeout(this.connectionTimeout);
+                    this.authenticating = false;
+                    reject(err);
+                }
+            }).finally(() => {
+                this.initPromise = null;
+            });
+            
+            return this.initPromise;
+        },
+        
+        handleMessage: function(message, resolve, reject, stopAtHash = false) {
+            try {
+                console.log(`Received [${this.botId || 'connecting'}]: ${message}`);
+                const colonIndex = message.indexOf(" :");
+                let payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
+                const parts = message.split(/\s+/);
+                const command = parts[0];
+                
+                switch (command) {
+                    case "PING":
+                        this.send("PONG");
+                        break;
+                    case "HAAAPSI":
+                        if (parts.length >= 2) {
+                            const code = parts[1];
+                            this.hash = genHash(code);
+                            console.log(`Generated hash [${this.botId || 'connecting'}]: ${this.hash}`);
+                            this.send(`RECOVER ${recoveryCode}`);
+                            this.state = CONNECTION_STATES.HASH_RECEIVED;
+                            if (stopAtHash) {
+                                console.log(`Warm pool connection reached HASH_RECEIVED state`);
+                            }
+                        }
+                        break;
+                    case "REGISTER":
+                        if (parts.length >= 4) {
+                            this.botId = parts[1];
+                            const password = parts[2];
+                            const nick = parts[3];
+                            if (stopAtHash) {
+                                this.registrationData = message;
+                                console.log(`Stored registration data for warm pool connection [${this.botId}]`);
+                                clearTimeout(this.connectionTimeout);
+                                this.authenticating = false;
+                                resolve(this);
+                                return;
+                            }
+                            if (this.hash) {
+                                this.send(`USER ${this.botId} ${password} ${nick} ${this.hash}`);
+                                console.log(`Authenticated with USER command [${this.botId}]`);
+                            }
+                        }
+                        break;
+                    case "999":
+                        this.state = CONNECTION_STATES.AUTHENTICATED;
+                        console.log(`Connection [${this.botId}] authenticated, sending setup commands...`);
+                        this.send("FWLISTVER 0");
+                        this.send("ADDONS 0 0");
+                        this.send("MYADDONS 0 0");
+                        this.send("PHONE 0 0 0 2 :Node.js");
+                        this.send("JOIN");
+                        currentAttackTime = config.startAttackTime;
+                        currentDefenceTime = config.startDefenceTime;
+                        this.state = CONNECTION_STATES.READY;
+                        this.authenticating = false;
+                        reconnectAttempt = 0;
+                        if (this.connectionTimeout) {
+                            clearTimeout(this.connectionTimeout);
+                            this.connectionTimeout = null;
+                        }
+                        console.log(`Connection [${this.botId}] is now READY`);
+                        resolve(this);
+                        break;
+                    case "353":
+                        parse353(payload, this);
+                        break;
+                    case "JOIN":
+                        handleJoinCommand(parts, this);
+                        break;
+                    case "PART":
+                        if (parts.length >= 2) {
+                            remove_user(parts[1]);
+                        }
+                        break;
+                    case "KICK":
+                        if (parts.length >= 3) {
+                            remove_user(parts[2]);
+                        }
+                        break;
+                    case "451":
+                    case "452":
+                        console.log(`Critical error ${command} [${this.botId || 'connecting'}]: ${message}`);
+                        if (this.authenticating) {
+                            this.authenticating = false;
+                            clearTimeout(this.connectionTimeout);
+                            this.cleanup();
+                            console.log(`⚡ Got ${command} error, trying immediate recovery with warm connection...`);
+                            reject(new Error(`Critical error ${command}`));
+                            Promise.resolve().then(() => {
+                                return getConnection(true).catch(err => {
+                                    console.error(`Failed to get warm connection after ${command} error:`, err);
+                                    return tryReconnectWithBackoff();
+                                });
+                            });
+                            return;
+                        }
+                        this.cleanup();
+                        break;
+                }
+            } catch (err) {
+                console.error(`Error handling message [${this.botId || 'connecting'}]:`, err);
+                if (this.authenticating) {
+                    this.authenticating = false;
+                    clearTimeout(this.connectionTimeout);
+                    reject(err);
+                }
+            }
+        },
+        
+        activateWarmConnection: function() {
+            return new Promise((resolve, reject) => {
+                try {
+                    if (this.state !== CONNECTION_STATES.HASH_RECEIVED || !this.registrationData) {
+                        reject(new Error("Cannot activate connection that isn't properly warmed up"));
+                        return;
+                    }
+                    console.log(`⚡ Fast-activating warm connection [${this.botId || 'pending'}]...`);
+                    this.authenticating = true;
+                    this.connectionTimeout = setTimeout(() => {
+                        console.log("Connection activation timeout");
+                        this.authenticating = false;
+                        reject(new Error("Connection activation timeout"));
+                    }, 5000);
+                    const parts = this.registrationData.split(/\s+/);
+                    if (parts.length >= 4) {
+                        this.botId = parts[1];
+                        const password = parts[2];
+                        const nick = parts[3];
+                        if (this.hash) {
+                            this.send(`USER ${this.botId} ${password} ${nick} ${this.hash}`);
+                            console.log(`Activated warm connection with USER command [${this.botId}]`);
+                            const originalOnMessage = this.socket.onmessage;
+                            this.socket.onmessage = (event) => {
+                                const message = event.data.toString().trim();
+                                console.log(`Activation received: ${message}`);
+                                if (message.startsWith("999")) {
+                                    this.state = CONNECTION_STATES.AUTHENTICATED;
+                                    console.log(`Warm connection [${this.botId}] authenticated, sending setup commands...`);
+                                    this.send("FWLISTVER 0");
+                                    this.send("ADDONS 0 0");
+                                    this.send("MYADDONS 0 0");
+                                    this.send("PHONE 0 0 0 2 :Node.js");
+                                    this.send("JOIN");
+                                    this.state = CONNECTION_STATES.READY;
+                                    this.authenticating = false;
+                                    reconnectAttempt = 0;
+                                    if (this.connectionTimeout) {
+                                        clearTimeout(this.connectionTimeout);
+                                        this.connectionTimeout = null;
+                                    }
+                                    console.log(`⚡ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
+                                    this.socket.onmessage = originalOnMessage;
+                                    resolve(this);
+                                    return;
+                                }
+                                if (originalOnMessage) {
+                                    originalOnMessage(event);
+                                }
+                            };
+                        } else {
+                            reject(new Error("No hash available for activation"));
+                        }
+                    } else {
+                        reject(new Error("Invalid registration data for activation"));
+                    }
+                } catch (err) {
+                    console.error("Error during warm connection activation:", err);
+                    this.authenticating = false;
+                    clearTimeout(this.connectionTimeout);
+                    reject(err);
+                }
+            });
+        },
+        
+        cleanup: function() {
+            try {
+                if (this.connectionTimeout) {
+                    clearTimeout(this.connectionTimeout);
+                    this.connectionTimeout = null;
+                }
+                if (this.socket) {
+                    this.socket.removeAllListeners();
+                    if ([WebSocket.OPEN, WebSocket.CONNECTING].includes(this.socket.readyState)) {
+                        this.socket.terminate();
+                    }
+                    this.socket = null;
+                }
+                this.state = CONNECTION_STATES.CLOSED;
+                this.authenticating = false;
+            } catch (err) {
+                console.error(`Error in cleanup [${this.botId || 'connecting'}]:`, err);
+            }
+        }
+    };
+    return conn;
+}
 
-        socket.addEventListener('message', messageHandler);
+// Parse 353 command (user list)
+function parse353(payload, connection) {
+    console.log(`Parsing 353 payload [${connection.botId}]: ${payload}`);
+    const tokens = payload.split(' ');
+    let i = 0;
+    let detectedRivals = [];
+    
+    while (i < tokens.length) {
+        let name = tokens[i];
+        let hasPrefix = false;
+        
+        if (name.length > 1 && (name.startsWith('@') || name.startsWith('+'))) {
+            name = name.substring(1);
+            hasPrefix = true;
+        }
+        
+        i++;
+        
+        if (i < tokens.length && !isNaN(tokens[i])) {
+            const id = tokens[i];
+            userMap[name] = id;
+            console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
+            if (rivalNames.includes(name)) {
+                detectedRivals.push(name);
+                console.log(`Detected rival [${connection.botId}]: ${name} with ID ${id}`);
+            }
+            i++;
+        } else if (hasPrefix) {
+            i--;
+        }
+    }
+    
+    if (detectedRivals.length > 0) {
+        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.join(', ')} - Defence mode activated`);
+        handleRivals(detectedRivals, 'defence', connection);
+    } else {
+        console.log(`No rivals detected in 353 [${connection.botId}], continuing to monitor`);
+    }
+    
+    return detectedRivals.length > 0;
+}
+
+// Handle JOIN command
+function handleJoinCommand(parts, connection) {
+    if (parts.length >= 4) {
+        let prefix = "";
+        let name = "";
+        let id = "";
+        
+        if (parts.length >= 5 && !isNaN(parts[3])) {
+            prefix = parts[1];
+            name = parts[2];
+            id = parts[3];
+        } else {
+            name = parts[1];
+            id = parts[2];
+        }
+        
+        userMap[name] = id;
+        console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
+        
+        if (rivalNames.includes(name)) {
+            console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated`);
+            handleRivals([name], 'attack', connection);
+        }
+    }
+}
+
+function remove_user(user) {
+    if (userMap[user]) {
+        delete userMap[user];
+        console.log(`Removed user ${user} from userMap`);
+    }
+}
+
+async function warmConnectionPool() {
+    if (poolWarmupInProgress) {
+        console.log("Pool warmup already in progress, skipping");
+        return;
+    }
+    
+    try {
+        poolWarmupInProgress = true;
+        console.log(`Warming connection pool (current size: ${connectionPool.length}/${MAX_POOL_SIZE})`);
+        
+        const now = Date.now();
+        const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes
+        for (let i = connectionPool.length - 1; i >= 0; i--) {
+            const conn = connectionPool[i];
+            if (now - conn.lastUsed > STALE_THRESHOLD || 
+                (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY)) {
+                console.log(`Pruning connection ${conn.botId || 'none'} from pool (State: ${conn.state}, Age: ${(now - conn.createdAt)/1000}s)`);
+                conn.cleanup();
+                connectionPool.splice(i, 1);
+            }
+        }
+        
+        const connectionsToAdd = Math.max(0, MAX_POOL_SIZE - connectionPool.length);
+        if (connectionsToAdd > 0) {
+            console.log(`Adding ${connectionsToAdd} new warm connection(s) to pool`);
+            const batchSize = 5;
+            for (let batch = 0; batch < Math.ceil(connectionsToAdd / batchSize); batch++) {
+                const batchPromises = [];
+                const batchStart = batch * batchSize;
+                const batchEnd = Math.min((batch + 1) * batchSize, connectionsToAdd);
+                for (let i = batchStart; i < batchEnd; i++) {
+                    const conn = createConnection();
+                    batchPromises.push((async () => {
+                        try {
+                            console.log(`Initializing pool connection ${i+1}/${connectionsToAdd} (warm mode)`);
+                            await conn.initialize(true);
+                            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
+                                connectionPool.push(conn);
+                                console.log(`Added new warm connection to pool (total: ${connectionPool.length}/${MAX_POOL_SIZE})`);
+                                return true;
+                            } else {
+                                console.warn(`Connection reached end of initialization but state is ${conn.state}, not adding to pool`);
+                                conn.cleanup();
+                                return false;
+                            }
+                        } catch (error) {
+                            console.error(`Failed to initialize connection for pool:`, error.message || error);
+                            conn.cleanup();
+                            return false;
+                        }
+                    })());
+                }
+                await Promise.allSettled(batchPromises);
+            }
+        }
+        console.log(`Connection pool warm-up complete. Pool size: ${connectionPool.length}/${MAX_POOL_SIZE}`);
+    } catch (err) {
+        console.error("Error in warmConnectionPool:", err);
+    } finally {
+        poolWarmupInProgress = false;
+    }
+}
+
+async function getConnection(activateFromPool = true) {
+    console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
+    if (activeConnection && activeConnection.state === CONNECTION_STATES.READY) {
+        console.log(`Reusing existing active connection ${activeConnection.botId}`);
+        return activeConnection;
+    }
+    
+    const warmConnections = connectionPool.filter(conn => 
+        conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData);
+    console.log(`Warm connections available: ${warmConnections.length}/${connectionPool.length}`);
+    
+    let chosenConn = null;
+    if (activateFromPool && warmConnections.length > 0) {
+        let oldestIdx = -1;
+        let oldestTime = Date.now();
+        for (let i = 0; i < connectionPool.length; i++) {
+            const conn = connectionPool[i];
+            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
+                if (conn.createdAt < oldestTime) {
+                    oldestTime = conn.createdAt;
+                    oldestIdx = i;
+                }
+            }
+        }
+        if (oldestIdx !== -1) {
+            chosenConn = connectionPool[oldestIdx];
+            connectionPool.splice(oldestIdx, 1);
+            console.log(`⚡ Using warm connection from pool (pool size now: ${connectionPool.length}/${MAX_POOL_SIZE})`);
+            try {
+                console.time('warmActivation');
+                await chosenConn.activateWarmConnection();
+                console.timeEnd('warmActivation');
+                activeConnection = chosenConn;
+                Promise.resolve().then(() => {
+                    warmConnectionPool().catch(err => {
+                        console.error("Error warming connection pool after using connection:", err);
+                    });
+                });
+                return chosenConn;
+            } catch (error) {
+                console.error("Failed to activate warm connection:", error.message || error);
+                chosenConn.cleanup();
+            }
+        } else {
+            console.log("No suitable warm connections in pool");
+        }
+    } else if (!activateFromPool) {
+        console.log("Not using pool for this connection (monitoring mode)");
+    }
+    
+    console.log("Creating new active connection");
+    const newConn = createConnection();
+    try {
+        await newConn.initialize(false);
+        activeConnection = newConn;
+        return newConn;
+    } catch (error) {
+        console.error("Failed to create new connection:", error.message || error);
+        Promise.resolve().then(() => {
+            warmConnectionPool().catch(err => {
+                console.error("Error warming connection pool after connection failure:", err);
+            });
+        });
+        throw error;
+    }
+}
+
+async function getMonitoringConnection() {
+    return getConnection(false);
+}
+
+async function tryReconnectWithBackoff() {
+    reconnectAttempt++;
+    const backoffTime = Math.min(RECONNECT_BACKOFF_BASE * Math.pow(1.5, reconnectAttempt - 1), 3000);
+    console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff...`);
+    return new Promise((resolve, reject) => {
+        setTimeout(async () => {
+            try {
+                const conn = await getConnection(true);
+                resolve(conn);
+            } catch (error) {
+                console.error(`Reconnect attempt ${reconnectAttempt} failed:`, error.message || error);
+                if (reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
+                    try {
+                        const conn = await tryReconnectWithBackoff();
+                        resolve(conn);
+                    } catch (err) {
+                        reject(err);
+                    }
+                } else {
+                    console.error(`Giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`);
+                    reconnectAttempt = 0;
+                    reject(new Error("Maximum reconnection attempts reached"));
+                }
+            }
+        }, backoffTime);
     });
 }
 
-const actions = {
-    switchToFrame: async (frameIndex, selectorType, selector) => {
-        try {
-            return await sendMessage({ action: 'switchToFrame', frameIndex, selectorType, selector });
-        } catch (error) {
-            console.error('Error in switchToFrame:', error);
-            throw error;
-        }
-    },
-    switchToFramePlanet: async (frameIndex, selectorType, selector) => {
-        try {
-            return await sendMessage({ action: 'switchToFramePlanet', frameIndex, selectorType, selector });
-        } catch (error) {
-            console.error('Error in switchToFramePlanet:', error);
-            throw error;
-        }
-    },
-    switchToDefaultFrame: async (selector) => {
-        try {
-            return await sendMessage({ action: 'switchToDefaultFrame', selector });
-        } catch (error) {
-            console.error('Error in switchToDefaultFrame:', error);
-            throw error;
-        }
-    },
-    click: (selector) => sendMessage({ action: 'click', selector }),
-        runAiChat: (user) => sendMessage({ action: 'runAiChat', user }),
-    xpath: (xpath) => sendMessage({ action: 'xpath', xpath }),
-    enterRecoveryCode: (code) => sendMessage({ action: 'enterRecoveryCode', code }),
-    sleep: (ms) => sendMessage({ action: 'sleep', ms }),
-    scroll: (selector) => sendMessage({ action: 'scroll', selector }),
-    pressShiftC: (selector) => sendMessage({ action: 'pressShiftC', selector }),
-    waitForClickable: (selector) => sendMessage({ action: 'waitForClickable', selector }),
-    findAndClickByPartialText: async (text) => {
-        try {
-            let response = await sendMessage({ action: 'findAndClickByPartialText', text });
-            if (!response || !('flag' in response)) {
-                throw new Error('Flag not found in response');
-            }
-            return response;
-        } catch (error) {
-            console.error('Error in findAndClickByPartialText:', error);
-            throw error;
-        }
-    },
-    reloadPage: async () => {
-        isReconnecting = true;
-        try {
-            await sendMessage({ action: 'reloadPage' });
-            console.log("Page reloaded and WebSocket reconnected");
-        } catch (error) {
-            console.error("Error during page reload:", error);
-        } finally {
-            isReconnecting = false;
-        }
-    },
-        checkUsername: async (rivals) => {
-                try {
-                        // Convert single rival to array if needed
-                        const rivalsArray = Array.isArray(rivals) ? rivals : [rivals];
-                        const quotedRivals = rivalsArray.map(r => `${r.trim()}`);
-                        const result = await sendMessage({ 
-                                action: 'checkUsername', 
-                                selector: '.planet-bar__item-name__name',
-                                expectedText: quotedRivals // Send array of trimmed rival names
-                        });
-                        return result.matches || false;
-                } catch (error) {
-                        console.error('Error in checkUsername:', error);
-                        return false;
-                }
-        },
-    searchAndClick: async ({ selector, rivals }) => {
-    if (!Array.isArray(rivals)) throw new Error('rivals must be an array');
-    try {
-        let response = await sendMessage({ action: 'searchAndClick', selector, rivals });
-        if (!response || !('flag' in response) || !('matchedRival' in response)) {
-            throw new Error('Flag or matchedRival not found in response');
-        }
-        return response;
-    } catch (error) {
-        console.error('Error in searchAndClick:', error);
-        throw error;
+warmConnectionPool().catch(err => {
+    console.error("Error during initial connection pool warm-up:", err);
+});
+
+setInterval(() => {
+    if (!poolWarmupInProgress) {
+        warmConnectionPool().catch(err => {
+            console.error("Error warming connection pool:", err);
+        });
     }
-	},
+}, 20000);
 
-    enhancedSearchAndClick: (position) => sendMessage({ action: 'enhancedSearchAndClick', position }),
-    doubleClick: (selector) => sendMessage({ action: 'doubleClick', selector }),
-    performSequentialActions: (actions) => sendMessage({ action: 'performSequentialActions', actions })
-};
+function updateTimingValue(type) {
+    if (type === 'attack') {
+        currentAttackTime += config.attackIntervalTime;
+        if (currentAttackTime > config.stopAttackTime) {
+            currentAttackTime = config.startAttackTime;
+        }
+        console.log(`Updated attack time to: ${currentAttackTime}ms`);
+        return currentAttackTime;
+    } else {
+        currentDefenceTime += config.defenceIntervalTime;
+        if (currentDefenceTime > config.stopDefenceTime) {
+            currentDefenceTime = config.startDefenceTime;
+        }
+        console.log(`Updated defence time to: ${currentDefenceTime}ms`);
+        return currentDefenceTime;
+    }
+}
 
-async function checkIfInPrison(planetName) {
+async function handleRivals(rivals, mode, connection) {
+    if (!connection.botId || rivals.length === 0) {
+        console.log(`No rivals to handle or bot ID not set`);
+        return;
+    }
+    
+    const waitTime = mode === 'attack' ? currentAttackTime : currentDefenceTime;
+    console.log(`Handling rivals in ${mode} mode with wait time: ${waitTime}ms [${connection.botId}]`);
+    
+    monitoringMode = false;
+    
+    for (const rival of rivals) {
+        const id = userMap[rival];
+        if (id) {
+            await new Promise(resolve => {
+                setTimeout(() => {
+                    connection.send(`ACTION 3 ${id}`);
+                    resolve();
+                }, waitTime);
+            });
+            console.log(`Completed actions on ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+        }
+    }
+    
+    updateTimingValue(mode);
+    connection.send(`QUIT :ds`);
+    monitoringMode = true;
+    
+    if (activeConnection === connection) {
+        activeConnection = null;
+    }
+    
+    console.log("⚡ Actions completed, immediately activating warm connection");
+    Promise.resolve().then(async () => {
+        try {
+            console.time('reconnectAfterAction');
+            await getConnection(true);
+            console.timeEnd('reconnectAfterAction');
+        } catch (error) {
+            console.error("Failed to get new connection after rival handling:", error.message || error);
+            tryReconnectWithBackoff().catch(retryError => {
+                console.error("All reconnection attempts failed:", retryError.message || retryError);
+            });
+        }
+    });
+}
+
+async function recoverUser(password) {
+    console.log("Starting recovery with code:", password);
+    await warmConnectionPool().catch(err => {
+        console.error("Initial pool warm-up failed:", err.message || err);
+    });
     try {
-        console.log("Checking if in prison...");
-        const result = await actions.findAndClickByPartialText(planetName);
-        console.log("Prison check result:", result);
-        if (!result.flag) {
-            await actions.waitForClickable('.planet-bar__button__action > img');
-            await actions.click('.mdc-button > .mdc-top-app-bar__title');
-            console.log("Prison element found and clicked");
-            return true;
+        await getMonitoringConnection();
+        console.log("Initial monitoring connection established successfully");
+    } catch (error) {
+        console.error("Failed to establish initial monitoring connection:", error.message || error);
+        setTimeout(() => {
+            recoverUser(password);
+        }, 1000);
+    }
+}
+
+async function maintainMonitoringConnection() {
+    if (monitoringMode && (!activeConnection || activeConnection.state !== CONNECTION_STATES.READY)) {
+        console.log("Maintaining monitoring connection...");
+        try {
+            await getMonitoringConnection();
+        } catch (error) {
+            console.error("Failed to maintain monitoring connection:", error.message || error);
+            setTimeout(() => {
+                maintainMonitoringConnection();
+            }, 5000);
+        }
+    }
+}
+
+setInterval(() => {
+    maintainMonitoringConnection();
+}, 30000);
+
+recoverUser(recoveryCode);
+
+process.on('SIGINT', () => {
+    console.log("Shutting down...");
+    connectionPool.forEach(conn => {
+        conn.cleanup();
+    });
+    if (activeConnection) {
+        activeConnection.cleanup();
+    }
+    process.exit(0);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught exception:', error.message || error);
+    if (activeConnection) {
+        activeConnection.cleanup();
+        activeConnection = null;
+    }
+    setTimeout(() => {
+        if (monitoringMode) {
+            getMonitoringConnection().catch(err => {
+                console.error("Failed to get new monitoring connection after uncaught exception:", err.message || err);
+            });
         } else {
-            console.log("Not in prison");
-            return false;
+            getConnection(true).catch(err => {
+                console.error("Failed to get new connection after uncaught exception:", err.message || err);
+            });
         }
-    } catch (error) {
-        console.error("Error in checkIfInPrison:", error);
-        return false;
+    }, 1000);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    if (activeConnection) {
+        activeConnection.cleanup();
+        activeConnection = null;
     }
-}
-
-async function autoRelease() {
-    try {
-           const actionss = [
-            { action: 'xpath', xpath: "//span[contains(.,'Planet Info')]" },
-            { action: 'switchToFrame', frameIndex: 2, selectorType: 'css', selector: '.free__early__release:nth-child(2) .free__early__release__title' },
-            { action: 'switchToFrame', frameIndex: 2, selectorType: 'css', selector: '#yes_btn > p' },
-            { action: 'switchToDefaultFrame', selector: 'button:nth-child(2) > img' },
-            { action: 'switchToFrame', frameIndex: 2, selectorType: 'css', selector: '.s__gd__plank:nth-child(1) .text' },
-            { action: 'switchToFramePlanet', frameIndex: 3, selectorType: 'css', selector: 'div.gc-action > a' }
-        ];
-        for (const action of actionss) {
-            await sendMessage(action);
-        } 
-        console.log("Auto-release successful");
-    } catch (error) {
-        console.error("Error in autoRelease:", error);
-        throw error;
-    }
-}
-
-async function executeRivalChecks(planetName) {
-    try {
-        await actions.xpath(`//span[contains(.,'${planetName}')]`);
-        await actions.xpath(`//span[contains(.,'Online now')]`);
-        return true;
-    } catch (error) {
-        if (error.message === "No matching name found") {
-            console.log("No matching name found");
-            return false;
-        }
-        console.error("Error in executeRivalChecks:", error);
-        throw error;
-    }
-}
-
-async function imprison() {
-    try {
-
-        // First verification: Check if rival is present in the planet
-        let rivalCheckResult1 = await actions.checkUsername(config.rival);
-
-        if (rivalCheckResult1) {
-            console.log("Rival verified successfully, proceeding with imprisonment");
-            // Proceed with imprisonment sequence
-            const imprisonSequence = [
-					{ action: 'click', selector: ".planet__events" },
-					{ action: 'click', selector: ".planet__events" },
-					{ action: 'click', selector: ".planet__events" },
-					{ action: 'pressShiftC', selector: ".planet-bar__button__action > img" },
-					{ action: 'performSequentialActions', actions: [
-                    { type: 'click', selector: ".dialog-item-menu__actions__item:last-child > .mdc-list-item__text" }
-                //    { type: 'click', selector: '.dialog__close-button > img' },
-                //    { type: 'xpath', xpath: "//a[contains(.,'Exit')]" }
-                ]},
-               // { action: 'click', selector: '.start__user__nick' }
-            ];
-
-            for (const action of imprisonSequence) {
-                await sendMessage(action);
-            }
-            
-            console.log("Imprison actions completed successfully");
-			await actions.reloadPage();
+    setTimeout(() => {
+        if (monitoringMode) {
+            getMonitoringConnection().catch(err => {
+                console.error("Failed to get new monitoring connection after unhandled rejection:", err.message || err);
+            });
         } else {
-            console.log("Rival verification failed, safely exiting");
-			await actions.reloadPage();
+            getConnection(true).catch(err => {
+                console.error("Failed to get new connection after unhandled rejection:", err.message || err);
+            });
         }
-    } catch (error) {
-        console.error("Error in imprison:", error);
-        // Ensure safe exit even in case of error
-        try {
-			await actions.reloadPage();
-        } catch (exitError) {
-            console.error("Error during safe exit:", exitError);
-        }
-        throw error;
-    }
-}
-
-async function waitForElement(selector, maxAttempts = 5, interval = 50) {
-    for (let i = 0; i < maxAttempts; i++) {
-        try {
-            await actions.waitForClickable(selector);
-            return true;
-        } catch (error) {
-            if (i === maxAttempts - 1) throw error;
-            await new Promise(resolve => setTimeout(resolve, interval));
-        }
-    }
-    return false;
-}
-
-async function mainLoop() {
-    let previousFlag = 1; // Initialize with 1 as default state
-    
-    while (true) {
-        try {
-            await actions.waitForClickable('.planet__events');
-            const loopStartTime = performance.now();
-            
-            const isInPrison = await checkIfInPrison(config.planetName);
-            if (isInPrison) {
-                console.log("In prison. Executing auto-release...");
-                await autoRelease();
-                continue;
-            }
-
-            await executeRivalChecks(config.planetName);
-            
-            const searchStartTime = performance.now();
-            const searchResult = await actions.searchAndClick({ selector: 'li', rivals: config.rival });
-            const searchEndTime = performance.now();
-
-            const searchDuration = searchEndTime - searchStartTime;
-            console.log(`Search duration: ${formatTiming(searchDuration)}`);
-            
-            // Set current flag based on search result
-            flag = searchResult.flag && searchResult.matchedRival ? 1 : 0;
-            console.log(`Current flag status: ${flag}, Previous flag status: ${previousFlag}`);
-            
-            if (flag === 1) {
-                let elapsedTime = searchEndTime - loopStartTime;
-                
-                // Check if previous loop had flag = 0, if yes, add 200ms to elapsed time
-                if (previousFlag === 0) {
-                    console.log(`Previous loop had flag = 0, adding 200ms to elapsed time`);
-                    elapsedTime -= 450;
-                }
-                
-                console.log(`Total elapsed time (with adjustments): ${formatTiming(elapsedTime)}`);
-                
-                const predictedTiming = mlModel.predictTiming(
-                    config.AttackTime,
-                    config.DefenceTime,
-                    config.interval
-                );
-                
-                console.log(`ML predicted timing: ${formatTiming(predictedTiming)}`);
-                console.log(`Estimated latency: ${formatTiming(mlModel.getEstimatedLatency())}`);
-                console.log(`Success rate: ${(mlModel.getSuccessRate() * 100).toFixed(2)}%`);
-                
-                await executeAttackSequence(elapsedTime, predictedTiming);
-                
-            } else {
-                const failureTime = performance.now() - loopStartTime;
-                mlModel.recordResult(config.AttackTime, false, failureTime);
-
-            }
-            
-            // Store current flag as previous flag for next iteration
-            previousFlag = flag;
-            
-        } catch (error) {
-            console.error("Error in main loop:", error);
-            await handleError(error);
-        }
-    }
-}
-
-async function executeAttackSequence(elapsedTime, predictedTiming) {
-    const startTime = performance.now();
-    let totalWaitTime = Math.max(0, predictedTiming - elapsedTime);
-    
-    if (predictedTiming > 0) {
-        console.log(`Waiting for ${formatTiming(predictedTiming)}`);
-        await actions.sleep(predictedTiming);
-    }
-    
-    await imprison();
-    
-    const executionTime = performance.now() - startTime;
-    console.log(`Attack execution time: ${formatTiming(executionTime)}`);
-    mlModel.recordResult(predictedTiming, true, executionTime);
-}
-
-async function initialConnection() {
-    try {
-        await actions.waitForClickable('.mdc-button--black-secondary > .mdc-button__label');
-        //await actions.xpath("//a[2]/div");
-        await actions.click('.mdc-button--black-secondary > .mdc-button__label');
-        console.log("First button clicked");
-        await actions.enterRecoveryCode(config.RC);
-        console.log("Recovery code entered");
-        await actions.click('.mdc-dialog__button:nth-child(2)');
-        console.log("Second button clicked");
-        await actions.runAiChat("`[R]OLE[X]`");
-        await mainLoop();
-    } catch (error) {
-        await handleError(error);
-    }
-}
-
-setupWebSocket();
+    }, 1000);
+});

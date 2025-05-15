@@ -1,701 +1,802 @@
-const puppeteer = require('puppeteer');
+const WebSocket = require('ws');
 const fs = require('fs').promises;
-const fsSync = require('fs'); // For file watching
-const path = require('path');
-const { Buffer } = require('buffer'); // Needed for potential Base64 decoding
+const fsSync = require('fs');
+const CryptoJS = require('crypto-js');
 
+// Configuration
+let config;
 let rivalNames = [];
-let planetName = "";
-let joinRegexes = [];
-let listRegexes = [];
-const PATTERNS_PER_RIVAL = 2;
+let recoveryCode;
+let userMap = {}; // Map of user names to IDs
+let reconnectAttempt = 0;
+
+// Connection pool settings
+const MAX_POOL_SIZE = 20; // Increased from 5 to 20 as requested
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_BACKOFF_BASE = 100; // Start with 100ms backoff
+const connectionPool = [];
+let activeConnection = null;
+let poolWarmupInProgress = false;
+
+// Connection states
+const CONNECTION_STATES = {
+    CLOSED: 'closed',
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+    HASH_RECEIVED: 'hash_received',
+    AUTHENTICATED: 'authenticated',
+    READY: 'ready'
+};
+
+// Attack and defense timing variables
+let currentAttackTime;
+let currentDefenceTime;
+let monitoringMode = true; // Flag to indicate if the bot should stay connected and monitor
 
 function updateConfigValues() {
     try {
         delete require.cache[require.resolve('./config1.json')];
         config = require('./config1.json');
+        rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
+        recoveryCode = config.RC;
         
-        rivalNamesArg = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
-        planetNameArg = config.planetName;
-        recoveryCodeArg = config.RC;
+        // Reset timing values to their initial state
+        currentAttackTime = config.startAttackTime;
+        currentDefenceTime = config.startDefenceTime;
         
-        timingParams.startAttack = config.startAttackTime || 0;
-        timingParams.startIntervalAttack = config.attackIntervalTime || 100;
-        timingParams.stopAttack = config.stopAttackTime || 5000;
-        timingParams.startDefence = config.startDefenceTime || 0;
-        timingParams.startDefenceInterval = config.defenceIntervalTime || 100;
-        timingParams.stopDefence = config.stopDefenceTime || 5000;
-        
-        console.log("Configuration updated from file:", config);
-        
-        const returnValues = {
-            newAttackDelay: timingParams.startAttack,
-            newDefenceDelay: timingParams.startDefence
-        };
-        
-        rivalNames = rivalNamesArg.split(',').map(name => name.trim());
-        console.log("Updated rival names array:", rivalNames);
-        
-        planetName = planetNameArg || "";
-        rebuildRegexPatterns();
-        
-        return returnValues;
+        console.log("Configuration updated:", { 
+            rivalNames, 
+            recoveryCode,
+            attackSettings: {
+                start: config.startAttackTime,
+                stop: config.stopAttackTime,
+                interval: config.attackIntervalTime,
+                current: currentAttackTime
+            },
+            defenceSettings: {
+                start: config.startDefenceTime,
+                stop: config.stopDefenceTime,
+                interval: config.defenceIntervalTime,
+                current: currentDefenceTime
+            }
+        });
     } catch (error) {
         console.error("Error updating config:", error);
-        return null;
     }
 }
 
-function rebuildRegexPatterns() {
-    joinRegexes = [];
-    listRegexes = [];
-    
-rivalNames.forEach((rivalName) => {
-  const e = escapeRegex(rivalName);
-  const prefix = `(?:^|[\\s@+])`;
-  const suffix = `(?=$|[\\s])`;
-
-  joinRegexes.push(new RegExp(
-    `JOIN\\s+[-\\s\\w]*?${prefix}${e}${suffix}\\s+\\d+`, 'i'
-  ));
-  joinRegexes.push(new RegExp(
-    `JOIN.*?${prefix}${e}${suffix}`, 'i'
-  ));
-
-  listRegexes.push(new RegExp(
-    `353\\s+\\d+.*?${prefix}${e}${suffix}\\s+\\d+`, 'i'
-  ));
-  listRegexes.push(new RegExp(
-    `353.*?${prefix}${e}${suffix}`, 'i'
-  ));
-});
-    
-    console.log("[Debug] Rebuilt JOIN regex patterns:");
-    joinRegexes.forEach((regex, i) => console.log(`  [${i}]: ${regex}`));
-}
-
-let config;
-let rivalNamesArg, planetNameArg, recoveryCodeArg, timingParams = {};
+// Initial config load
 updateConfigValues();
 
-async function updateGMValues() {
-    if (!page || page.isClosed()) return;
-    
-    try {
-        const currentRivalNames = Array.isArray(config.rival) ? config.rival.join(',') : config.rival;
-        const currentPlanetName = config.planetName;
-        
-        await page.evaluate(async (names, planet, params) => {
-            if (typeof window.GM_setValue !== 'function') {
-                console.error('[Browser] GM_setValue function not found!');
-                return;
-            }
-            
-            await window.GM_setValue('RIVAL_NAMES', names);
-            await window.GM_setValue('PLANET_NAME', planet);
-            await window.GM_setValue('TIMING_PARAMS', JSON.stringify(params));
-            await window.GM_setValue('CURRENT_ATTACK_DELAY', params.startAttack);
-            await window.GM_setValue('CURRENT_DEFENCE_DELAY', params.startDefence);
-            
-            console.log('[Browser] Configuration fully updated via GM_setValue with values:', 
-                { names, planet, params, 
-                  currentAttackDelay: params.startAttack, 
-                  currentDefenceDelay: params.startDefence });
-        }, currentRivalNames, currentPlanetName, timingParams);
-        
-        console.log("Successfully updated all GM values in browser context");
-    } catch (error) {
-        console.error("Error updating GM values:", error);
-    }
-}
-
-fsSync.watch('config1.json', async (eventType, filename) => {
+// Watch config file for changes
+fsSync.watch('config1.json', (eventType) => {
     if (eventType === 'change') {
         console.log('Config file changed, updating values...');
-        
-        const newDelays = updateConfigValues(); // Always update local variables
-        
-        if (newDelays && page && !page.isClosed()) {
-            try {
-                if (!isPrisonMode) {
-                    // If not in prison mode, update GM values and restart listener immediately
-                    await updateGMValues();
-                    if (cdpClient) {
-                        console.log("Config changed, restarting WebSocket monitoring...");
-                        await cdpClient.removeAllListeners();
-                        await cdpClient.detach().catch(e => console.warn("Warning: Error detaching CDP client after config change:", e.message));
-                        cdpClient = null;
-                        await setupWebSocketListener();
-                    }
-                } else {
-                    // During prison mode, defer GM update and listener restart
-                    console.log('Prison mode active, deferring GM value update and listener restart until after prison script completes.');
-                }
-                console.log('Configuration update handled.');
-            } catch (error) {
-                console.error("Error handling config change:", error);
-            }
-        }
+        updateConfigValues();
     }
 });
-if (rivalNames.length === 0) {
-    rivalNames = rivalNamesArg.split(',').map(name => name.trim());
-}
-if (!planetName) {
-    planetName = planetNameArg || "";
-}
 
-const scriptPath = path.join(__dirname, 'login.user_1.js');
-const prisonScriptPath = path.join(__dirname, 'prison.user_1.js');
-const targetUrl = 'https://galaxy.mobstudio.ru/web/';
-const recoveryCode = recoveryCodeArg;
-const postLoginSelector = '.mdc-button > .mdc-top-app-bar__title';
-
-console.log("=== Galaxy Auto-Attacker Configuration ===");
-console.log(`Target URL: ${targetUrl}`);
-console.log(`Rival Names: ${rivalNames.join(', ')}`);
-console.log(`Planet Name: ${planetName}`);
-console.log("Timing Parameters:", timingParams);
-console.log("=======================================");
-
-let browser;
-let page;
-let cdpClient = null;
-let isTampermonkeyRunning = false;
-let stopMonitoring = false;
-let isPrisonMode = false;
-
-function escapeRegex(str) {
-    if (!str) return '';
-    return str.replace(/[.*+?^${}()|[\]\\`]/g, '\\$&');
+function genHash(code) {
+    const hash = CryptoJS.MD5(code);
+    let str = hash.toString(CryptoJS.enc.Hex);
+    str = str.split("").reverse().join("0").substr(5, 10);
+    return str;
 }
 
-rivalNames.forEach((rivalName) => {
-  const e = escapeRegex(rivalName);
-  const prefix = `(?:^|[\\s@+])`;
-  const suffix = `(?=$|[\\s])`;
-
-  joinRegexes.push(new RegExp(
-    `JOIN\\s+[-\\s\\w]*?${prefix}${e}${suffix}\\s+\\d+`, 'i'
-  ));
-  joinRegexes.push(new RegExp(
-    `JOIN.*?${prefix}${e}${suffix}`, 'i'
-  ));
-
-  listRegexes.push(new RegExp(
-    `353\\s+\\d+.*?${prefix}${e}${suffix}\\s+\\d+`, 'i'
-  ));
-  listRegexes.push(new RegExp(
-    `353.*?${prefix}${e}${suffix}`, 'i'
-  ));
-});
-
-
-console.log("[Debug] JOIN regex patterns:");
-joinRegexes.forEach((regex, i) => console.log(`  [${i}]: ${regex}`));
-
-let planetRegex = null;
-if (planetName) {
-    const escapedPlanetName = escapeRegex(planetName);
-    planetRegex = new RegExp(escapedPlanetName, 'i');
-}
-
-const prisonRegex = /\bPRISON\b/i;
-const joinPrisonRegex = /JOIN\s*.+?Prison/i;
-const listPrisonRegex = /353\s*.+?Prison/i;
-
-(async () => {
-    try {
-        console.log('Launching browser...');
-        browser = await puppeteer.launch({
-            headless: "new",
-            args: [
-                '--start-maximized',
-                '--disable-infobars',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-setuid-sandbox',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--disable-csp'
-            ],
-        });
-        page = await browser.newPage();
-        console.log('Browser launched, new page created.');
-
-        page.on('console', msg => {
-            const type = msg.type().toUpperCase();
-            const text = msg.text();
-            console.log(`[BROWSER ${type}] ${text}`);
-        });
-        page.on('pageerror', error => console.error(`[BROWSER PAGEERROR] ${error.message}\n${error.stack}`));
-        page.on('requestfailed', request => console.warn(`[BROWSER REQFAIL] ${request.method()} ${request.url()} ${request.failure()?.errorText}`));
-        page.on('close', () => {
-            console.log('[Puppeteer] Page closed event detected.');
-            stopMonitoring = true;
-            if (cdpClient && cdpClient.connection()) {
-                cdpClient.detach().catch(e => console.error("Error detaching CDP on close:", e));
-                cdpClient = null;
-            }
-        });
-
-        await page.setViewport({ width: 1366, height: 768 });
-        console.log('Viewport set.');
-
-        console.log('Exposing functions for Tampermonkey...');
-        const storage = {};
-        await page.exposeFunction('GM_getValue_puppeteer', async (k, d) => storage[k] ?? d);
-        await page.exposeFunction('GM_setValue_puppeteer', (k, v) => {
-            storage[k] = v;
-            return v;
-        });
+function createConnection() {
+    const conn = {
+        socket: null,
+        state: CONNECTION_STATES.CLOSED,
+        hash: null,
+        botId: null,
+        lastUsed: Date.now(),
+        authenticating: false,
+        initPromise: null,
+        reconnectAttempt: 0,
+        createdAt: Date.now(),
+        connectionTimeout: null,
+        registrationData: null,
         
-        await page.exposeFunction('notifyPrisonScriptComplete', async (status) => {
-            if (stopMonitoring) return;
-            console.log(`[Puppeteer] Prison unlock script completed. Status: ${status}`);
-            isPrisonMode = false;
-            await restartMonitoring(null);
-        });
-        
-        await page.exposeFunction('notifyPuppeteerComplete', async (status) => {
-            if (stopMonitoring) return;
-            console.log(`[Puppeteer] Tampermonkey signaled completion. Status: ${status}`);
-            isTampermonkeyRunning = false;
-            await restartMonitoring(null);
-        });
-        
-        await page.exposeFunction('reportTampermonkeyError', (errorMessage) => {
-            console.error(`[Tampermonkey ERROR REPORT] ${errorMessage}`);
-        });
-        console.log('Functions exposed.');
-
-        console.log(`Injecting Tampermonkey script: ${scriptPath}`);
-        const userScript = await fs.readFile(scriptPath, 'utf8');
-        console.log(`Loading prison unlock script: ${prisonScriptPath}`);
-        const prisonScript = await fs.readFile(prisonScriptPath, 'utf8');
-        await page.evaluateOnNewDocument((userScriptContent, prisonScriptContent) => {
-            console.log('[Browser] Setting up GM environment in evaluateOnNewDocument...');
-            
-            window.GM_getValue = (key, defaultValue) => {
-                console.log(`[Browser GM] Getting value for key: ${key}`);
-                if (typeof window.GM_getValue_puppeteer === 'function') {
-                    return window.GM_getValue_puppeteer(key, defaultValue);
-                }
-                console.warn(`[Browser GM] GM_getValue_puppeteer not available yet for key: ${key}`);
-                return defaultValue;
-            };
-            
-            window.GM_setValue = (key, value) => {
-                console.log(`[Browser GM] Setting value for key: ${key}`);
-                if (typeof window.GM_setValue_puppeteer === 'function') {
-                    return window.GM_setValue_puppeteer(key, value);
-                }
-                console.warn(`[Browser GM] GM_setValue_puppeteer not available yet for key: ${key}`);
-                return value;
-            };
-            
-            window.unsafeWindow = window;
-            window.GM_addStyle = (css) => { 
-                let style = document.createElement('style'); 
-                style.textContent = css; 
-                document.head.append(style); 
-            };
-            window.GM_xmlhttpRequest = () => console.warn('GM_xmlhttpRequest not implemented');
-            window.GM_registerMenuCommand = () => console.warn('GM_registerMenuCommand not implemented');
-            window.GM_log = console.log;
-            
-            window.prisonScriptContent = prisonScriptContent;
-            window.userScriptContent = userScriptContent;
-            
-            window.executeUserScript = function() {
-                console.log('[Browser] Executing main user script...');
-                try {
-                    new Function(window.userScriptContent)();
-                    console.log('[Browser] Main user script executed successfully');
-                } catch (e) {
-                    console.error('[Browser] Error executing main user script:', e);
-                }
-            };
-            
-            window.executePrisonScript = function() {
-                try {
-                    console.log('[Browser] Executing prison unlock script...');
-                    new Function(window.prisonScriptContent)();
-                    window.prisonTimeoutId = setTimeout(() => {
-                        if (typeof window.notifyPrisonScriptComplete === 'function') {
-                            console.log('[Browser] Prison script timeout - forcing completion signal');
-                            window.notifyPrisonScriptComplete('TIMEOUT_COMPLETED');
-                        }
-                    }, 20000);
-                } catch (e) {
-                    console.error('[Browser] Error executing Prison script:', e);
-                    if (typeof window.notifyPrisonScriptComplete === 'function') {
-                        window.notifyPrisonScriptComplete('ERROR');
-                    }
-                }
-            };
-            
-            document.addEventListener('DOMContentLoaded', () => {
-                console.log('[Browser] DOMContentLoaded event fired, executing user script...');
-                window.executeUserScript();
-            });
-            
-            console.log('[Browser] evaluateOnNewDocument setup complete');
-        }, userScript, prisonScript);
-
-        console.log('Navigating to target site...');
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await delay(2000);
-        console.log('After navigation, verifying script execution...');
-        await page.evaluate(() => {
-            console.log('[Browser] In page.evaluate verification');
-            console.log('[Browser] tampermonkeyReady =', window.tampermonkeyReady);
-            console.log('[Browser] executeTampermonkeyLogic exists =', typeof window.executeTampermonkeyLogic === 'function');
-        });
-
-        try {
-            await page.evaluate((script) => {
-                new Function(script)();
-            }, userScript);
-            console.log('[Browser] UserScript evaluated successfully.');
-        } catch (e) {
-            console.error('[Browser] Error executing UserScript:', e.message, e.stack);
-        }
-
-        console.log('Navigation complete.');
-        await delay(3000);
-        await page.evaluate(() => {
-            const button = document.querySelector('.mdc-button--black-secondary');
-            if (button) {
-                button.click();
+        send: function(str) {
+            if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+                this.socket.send(str + "\r\n");
+                console.log(`Sent [${this.botId || 'connecting'}]: ${str}`);
+                this.lastUsed = Date.now();
                 return true;
+            } else {
+                console.log(`Cannot send [${this.botId || 'connecting'}]: Socket not open (state: ${this.state})`);
+                return false;
             }
-            return false;
-        });
-        await page.click('input[name="recoveryCode"]', { visible: true });
-        await page.type('input[name="recoveryCode"]', recoveryCode, { delay: 50 });
-        console.log('Waiting for final login button...');
-        await page.click('.mdc-dialog__button:nth-child(2)');
-        console.log('Login navigation likely complete.');
-        await delay(550);
-        const pageContent = await page.content();
-        console.log('Page title:', await page.title());
-        console.log('Scripts on page:', await page.evaluate(() => {
-            return Array.from(document.querySelectorAll('script')).map(s => s.src || 'inline');
-        }));
-        await page.evaluate(() => {
-            console.log("[Debug] Window properties:", Object.keys(window));
-            console.log("[Debug] tampermonkeyReady value:", window.tampermonkeyReady);
-            window.tampermonkeyReady = window.tampermonkeyReady || true;
-        });
-
-        await page.waitForFunction(() => {
-            return window.tampermonkeyReady === true || 
-                   window.tampermonkeyReady === 'error';
-        }, { timeout: 45000 });
-
-        const readyState = await page.evaluate(() => window.tampermonkeyReady);
-        if (readyState !== true) {
-            throw new Error(`Tampermonkey script failed to initialize: ${readyState}`);
-        }
-
-        // *** Optimization 1: Parallel Configuration Storage and WebSocket Setup ***
-        console.log('Storing configuration and setting up WebSocket listener in parallel...');
-        await Promise.all([
-            page.evaluate(async (names, planet, params) => {
-                await window.GM_setValue('RIVAL_NAMES', names);
-                await window.GM_setValue('PLANET_NAME', planet);
-                await window.GM_setValue('TIMING_PARAMS', JSON.stringify(params));
-                console.log('[Browser] Rival names, planet name and timing stored via GM_setValue.');
-            }, rivalNames, planetName, timingParams),
-            setupWebSocketListener()
-        ]);
-        console.log('Parallel setup complete.');
-
-        console.log('Initialization complete. Monitoring WebSocket messages...');
-        await new Promise(resolve => {});
-
-    } catch (error) {
-        console.error('Error in main Puppeteer script:', error);
-        await takeScreenshotOnError(page);
-        stopMonitoring = true;
-        if (browser) {
-            await browser.close().catch(e => console.error("Error closing browser during error handling:", e));
-        }
-        process.exit(1);
-    }
-})();
-
-async function setupWebSocketListener() {
-    if (stopMonitoring || !page || page.isClosed()) {
-        console.log("[Puppeteer] Skipping WebSocket listener setup (stop signal or page closed).");
-        return;
-    }
-
-    if (cdpClient) {
-        console.log("[Puppeteer] Detaching existing CDP session before creating new one.");
-        try {
-            await cdpClient.removeAllListeners();
-            await cdpClient.detach();
-        } catch (e) {
-            console.warn("Warning: Error detaching previous CDP client:", e.message);
-        }
-        cdpClient = null;
-    }
-
-    try {
-        console.log('[Puppeteer] Setting up WebSocket listener...');
-        isTampermonkeyRunning = false;
-        isPrisonMode = false;
-
-        cdpClient = await page.target().createCDPSession();
-        await cdpClient.send('Network.enable');
-        console.log('[Puppeteer] CDP Network domain enabled.');
-
-        const webSocketFrameReceivedListener = async ({ requestId, timestamp, response }) => {
-            if (stopMonitoring) return;
-            if (isTampermonkeyRunning || isPrisonMode) {
-                return;
+        },
+        
+        initialize: function(stopAtHash = false) {
+            if (this.initPromise) {
+                return this.initPromise;
             }
-            if (!page || page.isClosed()) {
-                console.log('[Puppeteer WS] Skipping message - Page is closed.');
-                if (cdpClient) await cdpClient.detach().catch(e => e);
-                return;
-            }
-            if (response.opcode !== 1) {
-                return;
-            }
-        
-            const payloadData = response.payloadData;
-            console.log(`[Puppeteer WS Received] Payload: ${payloadData.substring(0, 200)}...`);
-        
-            try {
-                if (joinPrisonRegex.test(payloadData) || listPrisonRegex.test(payloadData) || prisonRegex.test(payloadData)) {
-                    console.log('[Puppeteer] Prison detected in WebSocket message. Triggering prison unlock script.');
-                    isPrisonMode = true;
-                    
-                    await page.evaluate(() => {
-                        if (typeof window.executePrisonScript === 'function') {
-                            console.log('[Browser] Executing prison unlock script');
-                            window.executePrisonScript();
-                            window.prisonTimeoutId = setTimeout(() => {
-                                if (typeof window.notifyPrisonScriptComplete === 'function') {
-                                    console.log('[Browser] Prison script timeout - forcing completion signal');
-                                    window.notifyPrisonScriptComplete('TIMEOUT_COMPLETED');
-                                }
-                            }, 20000);
-                        } else {
-                            console.error('[Browser] Error: executePrisonScript function not defined!');
-                            if (typeof window.reportTampermonkeyError === 'function') {
-                                window.reportTampermonkeyError('executePrisonScript function not found');
-                            }
-                        }
-                    }).catch(evalError => {
-                        console.error(`[Puppeteer] Error during page.evaluate for prison script: ${evalError}`);
-                        isPrisonMode = false;
-                    });
-                    return;
-                }
-        
-                console.log(`[Debug] Current rival names being checked: ${rivalNames.join(', ')}`);
-                console.log(`[Debug] Current joinRegexes length: ${joinRegexes.length}`);
-        
-                let messageType = null;
-                let detectedRivalName = null;
-        
-                for (let i = 0; i < rivalNames.length; i++) {
-                    const rivalName = rivalNames[i];
-                    
-                    const joinExactIndex    = i * PATTERNS_PER_RIVAL;
-					const joinFallbackIndex = joinExactIndex + 1;
-
-					const joinMatchExact    = !!joinRegexes[joinExactIndex]?.test(payloadData);
-					const joinFallbackMatch = !!joinRegexes[joinFallbackIndex]?.test(payloadData);
-					const listExactIndex    = i * PATTERNS_PER_RIVAL;
-					const listFallbackIndex = listExactIndex + 1;
-					const listMatchExact    = !!listRegexes[listExactIndex]?.test(payloadData);
-					const listFallbackMatch = !!listRegexes[listFallbackIndex]?.test(payloadData)
-                    console.log(`[Debug] Testing rival '${rivalName}' against: ${payloadData.substring(0, 50)}...`);
-                    console.log(`[Debug] JOIN exact match: ${joinMatchExact}`);
-                    console.log(`[Debug] JOIN fallback match: ${joinFallbackMatch}`);
-        
-                    if (joinMatchExact || joinFallbackMatch) {
-                        console.log(`[Debug] SUCCESS! JOIN match found for '${rivalName}'`);
-                        messageType = 'JOIN';
-                        detectedRivalName = rivalName;
-                        break;
-                    } else if (listMatchExact || listFallbackMatch) {
-                        console.log(`[Debug] 353 match found for '${rivalName}'`);
-                        messageType = '353';
-                        detectedRivalName = rivalName;
-                        break;
-                    }
-                }
-        
-                if (messageType && detectedRivalName) {
-                    console.log(`[Puppeteer] Rival '${detectedRivalName}' detected in WebSocket message (Type: ${messageType}). Triggering Tampermonkey.`);
-                    isTampermonkeyRunning = true;
-                    await page.evaluate((type, rivalName) => {
-                        if (typeof window.executeTampermonkeyLogic === 'function') {
-                            console.log(`[Browser] Calling window.executeTampermonkeyLogic('${type}', '${rivalName}')`);
-                            return Promise.resolve(window.executeTampermonkeyLogic(type, rivalName))
-                                .catch(err => {
-                                    console.error('[Browser] Error executing executeTampermonkeyLogic:', err.message, err.stack);
-                                    if (typeof window.reportTampermonkeyError === 'function') {
-                                        window.reportTampermonkeyError(`Error in executeTampermonkeyLogic: ${err.message}`);
-                                    }
-                                });
-                        } else {
-                            console.error('[Browser] Error: window.executeTampermonkeyLogic is not defined!');
-                            if (typeof window.reportTampermonkeyError === 'function') {
-                                window.reportTampermonkeyError('executeTampermonkeyLogic function not found');
-                            }
-                            return Promise.reject(new Error('executeTampermonkeyLogic function not found'));
-                        }
-                    }, messageType, detectedRivalName).catch(evalError => {
-                        console.error(`[Puppeteer] Error during page.evaluate for Tampermonkey trigger: ${evalError}`);
-                        isTampermonkeyRunning = false;
-                    });
-                }
-        
-                await checkCurrentPlanetAndAct(payloadData);
-        
-            } catch (parseOrCheckError) {
-                console.warn(`[Puppeteer] Error processing WebSocket message: ${parseOrCheckError.message}. Payload: ${payloadData.substring(0, 100)}...`);
-            }
-        };
-        cdpClient.on('Network.webSocketFrameReceived', webSocketFrameReceivedListener);
-
-        cdpClient.on('error', (error) => {
-            console.error('[Puppeteer] CDP Error:', error);
-        });
-        cdpClient.on('sessiondetached', () => {
-            console.warn('[Puppeteer] CDP session detached.');
-            cdpClient = null;
-            if (!stopMonitoring) {
-                console.log('[Puppeteer] Attempting to restart monitoring after CDP detachment...');
-                setTimeout(() => restartMonitoring(null), 5000);
-            }
-        });
-
-        console.log('[Puppeteer] WebSocket listener is active.');
-
-    } catch (cdpError) {
-        console.error(`[Puppeteer] Failed to setup WebSocket listener: ${cdpError}`);
-        if (!stopMonitoring) {
-            console.log('[Puppeteer] Retrying listener setup after error...');
-            setTimeout(() => restartMonitoring(null), 10000);
-        }
-    }
-}
-
-async function checkCurrentPlanetAndAct(payloadData) {
-    if (stopMonitoring || !page || page.isClosed()) return;
-    try {
-        if (payloadData && (joinPrisonRegex.test(payloadData) || listPrisonRegex.test(payloadData) || prisonRegex.test(payloadData))) {
-            console.log("[Planet Check] Detected prison planet via WebSocket payload! Triggering unlock sequence...");
-            isPrisonMode = true;
             
-            await page.evaluate(() => {
-                if (typeof window.executePrisonScript === 'function') {
-                    window.executePrisonScript();
-                } else {
-                    console.error('[Browser] executePrisonScript not defined');
+            this.initPromise = new Promise((resolve, reject) => {
+                try {
+                    if (this.socket) {
+                        this.cleanup();
+                    }
+                    
+                    this.state = CONNECTION_STATES.CONNECTING;
+                    this.authenticating = true;
+                    console.log(`Initializing new connection (stopAtHash: ${stopAtHash})...`);
+                    
+                    this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", {
+                        rejectUnauthorized: false,
+                        handshakeTimeout: 3000 // Reduced timeout
+                    });
+                    
+                    this.connectionTimeout = setTimeout(() => {
+                        console.log("Connection initialization timeout");
+                        this.authenticating = false;
+                        this.cleanup();
+                        reject(new Error("Connection initialization timeout"));
+                    }, 5000); // Reduced to 5 seconds
+                    
+                    this.socket.on('open', () => {
+                        this.state = CONNECTION_STATES.CONNECTED;
+                        console.log("WebSocket connected, initializing identity");
+                        this.send(":ru IDENT 352 -2 4030 1 2 :GALA");
+                    });
+                    
+                    this.socket.on('message', (data) => {
+                        const message = data.toString().trim();
+                        
+                        if (stopAtHash && this.state === CONNECTION_STATES.HASH_RECEIVED) {
+                            console.log(`Warm pool connection [${this.botId || 'connecting'}] received message but stopping at hash: ${message}`);
+                            if (message.startsWith("REGISTER")) {
+                                console.log("Storing registration data for later activation");
+                                this.registrationData = message;
+                                clearTimeout(this.connectionTimeout);
+                                this.authenticating = false;
+                                resolve(this);
+                                return;
+                            }
+                        }
+                        
+                        this.handleMessage(message, resolve, reject, stopAtHash);
+                    });
+                    
+                    this.socket.on('close', () => {
+                        console.log(`WebSocket [${this.botId || 'connecting'}] closed (state: ${this.state})`);
+                        if (this.authenticating) {
+                            this.authenticating = false;
+                            clearTimeout(this.connectionTimeout);
+                            reject(new Error("Connection closed during authentication"));
+                        }
+                        this.state = CONNECTION_STATES.CLOSED;
+                        const index = connectionPool.indexOf(this);
+                        if (index !== -1) {
+                            connectionPool.splice(index, 1);
+                        }
+                        if (this === activeConnection) {
+                            console.log("Active connection closed, getting new connection immediately");
+                            activeConnection = null;
+                            Promise.resolve().then(() => {
+                                return getConnection(true).catch(err => {
+                                    console.error("Failed to get new connection after close:", err);
+                                    return tryReconnectWithBackoff();
+                                });
+                            });
+                        }
+                    });
+                    
+                    this.socket.on('error', (error) => {
+                        console.error(`WebSocket [${this.botId || 'connecting'}] error:`, error.message || error);
+                        if (this.authenticating) {
+                            this.authenticating = false;
+                            clearTimeout(this.connectionTimeout);
+                            reject(error);
+                        }
+                    });
+                } catch (err) {
+                    console.error("Error during connection initialization:", err);
+                    clearTimeout(this.connectionTimeout);
+                    this.authenticating = false;
+                    reject(err);
+                }
+            }).finally(() => {
+                this.initPromise = null;
+            });
+            
+            return this.initPromise;
+        },
+        
+        handleMessage: function(message, resolve, reject, stopAtHash = false) {
+            try {
+                console.log(`Received [${this.botId || 'connecting'}]: ${message}`);
+                const colonIndex = message.indexOf(" :");
+                let payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
+                const parts = message.split(/\s+/);
+                const command = parts[0];
+                
+                switch (command) {
+                    case "PING":
+                        this.send("PONG");
+                        break;
+                    case "HAAAPSI":
+                        if (parts.length >= 2) {
+                            const code = parts[1];
+                            this.hash = genHash(code);
+                            console.log(`Generated hash [${this.botId || 'connecting'}]: ${this.hash}`);
+                            this.send(`RECOVER ${recoveryCode}`);
+                            this.state = CONNECTION_STATES.HASH_RECEIVED;
+                            if (stopAtHash) {
+                                console.log(`Warm pool connection reached HASH_RECEIVED state`);
+                            }
+                        }
+                        break;
+                    case "REGISTER":
+                        if (parts.length >= 4) {
+                            this.botId = parts[1];
+                            const password = parts[2];
+                            const nick = parts[3];
+                            if (stopAtHash) {
+                                this.registrationData = message;
+                                console.log(`Stored registration data for warm pool connection [${this.botId}]`);
+                                clearTimeout(this.connectionTimeout);
+                                this.authenticating = false;
+                                resolve(this);
+                                return;
+                            }
+                            if (this.hash) {
+                                this.send(`USER ${this.botId} ${password} ${nick} ${this.hash}`);
+                                console.log(`Authenticated with USER command [${this.botId}]`);
+                            }
+                        }
+                        break;
+                    case "999":
+                        this.state = CONNECTION_STATES.AUTHENTICATED;
+                        console.log(`Connection [${this.botId}] authenticated, sending setup commands...`);
+                        this.send("FWLISTVER 0");
+                        this.send("ADDONS 0 0");
+                        this.send("MYADDONS 0 0");
+                        this.send("PHONE 0 0 0 2 :Node.js");
+                        this.send("JOIN");
+                        currentAttackTime = config.startAttackTime;
+                        currentDefenceTime = config.startDefenceTime;
+                        this.state = CONNECTION_STATES.READY;
+                        this.authenticating = false;
+                        reconnectAttempt = 0;
+                        if (this.connectionTimeout) {
+                            clearTimeout(this.connectionTimeout);
+                            this.connectionTimeout = null;
+                        }
+                        console.log(`Connection [${this.botId}] is now READY`);
+                        resolve(this);
+                        break;
+                    case "353":
+                        parse353(payload, this);
+                        break;
+                    case "JOIN":
+                        handleJoinCommand(parts, this);
+                        break;
+                    case "PART":
+                        if (parts.length >= 2) {
+                            remove_user(parts[1]);
+                        }
+                        break;
+                    case "KICK":
+                        if (parts.length >= 3) {
+                            remove_user(parts[2]);
+                        }
+                        break;
+                    case "451":
+                    case "452":
+                        console.log(`Critical error ${command} [${this.botId || 'connecting'}]: ${message}`);
+                        if (this.authenticating) {
+                            this.authenticating = false;
+                            clearTimeout(this.connectionTimeout);
+                            this.cleanup();
+                            console.log(`⚡ Got ${command} error, trying immediate recovery with warm connection...`);
+                            reject(new Error(`Critical error ${command}`));
+                            Promise.resolve().then(() => {
+                                return getConnection(true).catch(err => {
+                                    console.error(`Failed to get warm connection after ${command} error:`, err);
+                                    return tryReconnectWithBackoff();
+                                });
+                            });
+                            return;
+                        }
+                        this.cleanup();
+                        break;
+                }
+            } catch (err) {
+                console.error(`Error handling message [${this.botId || 'connecting'}]:`, err);
+                if (this.authenticating) {
+                    this.authenticating = false;
+                    clearTimeout(this.connectionTimeout);
+                    reject(err);
+                }
+            }
+        },
+        
+        activateWarmConnection: function() {
+            return new Promise((resolve, reject) => {
+                try {
+                    if (this.state !== CONNECTION_STATES.HASH_RECEIVED || !this.registrationData) {
+                        reject(new Error("Cannot activate connection that isn't properly warmed up"));
+                        return;
+                    }
+                    console.log(`⚡ Fast-activating warm connection [${this.botId || 'pending'}]...`);
+                    this.authenticating = true;
+                    this.connectionTimeout = setTimeout(() => {
+                        console.log("Connection activation timeout");
+                        this.authenticating = false;
+                        reject(new Error("Connection activation timeout"));
+                    }, 5000);
+                    const parts = this.registrationData.split(/\s+/);
+                    if (parts.length >= 4) {
+                        this.botId = parts[1];
+                        const password = parts[2];
+                        const nick = parts[3];
+                        if (this.hash) {
+                            this.send(`USER ${this.botId} ${password} ${nick} ${this.hash}`);
+                            console.log(`Activated warm connection with USER command [${this.botId}]`);
+                            const originalOnMessage = this.socket.onmessage;
+                            this.socket.onmessage = (event) => {
+                                const message = event.data.toString().trim();
+                                console.log(`Activation received: ${message}`);
+                                if (message.startsWith("999")) {
+                                    this.state = CONNECTION_STATES.AUTHENTICATED;
+                                    console.log(`Warm connection [${this.botId}] authenticated, sending setup commands...`);
+                                    this.send("FWLISTVER 0");
+                                    this.send("ADDONS 0 0");
+                                    this.send("MYADDONS 0 0");
+                                    this.send("PHONE 0 0 0 2 :Node.js");
+                                    this.send("JOIN");
+                                    this.state = CONNECTION_STATES.READY;
+                                    this.authenticating = false;
+                                    reconnectAttempt = 0;
+                                    if (this.connectionTimeout) {
+                                        clearTimeout(this.connectionTimeout);
+                                        this.connectionTimeout = null;
+                                    }
+                                    console.log(`⚡ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
+                                    this.socket.onmessage = originalOnMessage;
+                                    resolve(this);
+                                    return;
+                                }
+                                if (originalOnMessage) {
+                                    originalOnMessage(event);
+                                }
+                            };
+                        } else {
+                            reject(new Error("No hash available for activation"));
+                        }
+                    } else {
+                        reject(new Error("Invalid registration data for activation"));
+                    }
+                } catch (err) {
+                    console.error("Error during warm connection activation:", err);
+                    this.authenticating = false;
+                    clearTimeout(this.connectionTimeout);
+                    reject(err);
                 }
             });
-        } else if (!payloadData) {
-            console.log("[Planet Check] No payloadData available to check prison state.");
+        },
+        
+        cleanup: function() {
+            try {
+                if (this.connectionTimeout) {
+                    clearTimeout(this.connectionTimeout);
+                    this.connectionTimeout = null;
+                }
+                if (this.socket) {
+                    this.socket.removeAllListeners();
+                    if ([WebSocket.OPEN, WebSocket.CONNECTING].includes(this.socket.readyState)) {
+                        this.socket.terminate();
+                    }
+                    this.socket = null;
+                }
+                this.state = CONNECTION_STATES.CLOSED;
+                this.authenticating = false;
+            } catch (err) {
+                console.error(`Error in cleanup [${this.botId || 'connecting'}]:`, err);
+            }
         }
-    } catch (error) {
-        console.error("[Planet Check] Error during planet verification:", error);
+    };
+    return conn;
+}
+
+// Parse 353 command (user list)
+function parse353(payload, connection) {
+    console.log(`Parsing 353 payload [${connection.botId}]: ${payload}`);
+    const tokens = payload.split(' ');
+    let i = 0;
+    let detectedRivals = [];
+    
+    while (i < tokens.length) {
+        let name = tokens[i];
+        let hasPrefix = false;
+        
+        if (name.length > 1 && (name.startsWith('@') || name.startsWith('+'))) {
+            name = name.substring(1);
+            hasPrefix = true;
+        }
+        
+        i++;
+        
+        if (i < tokens.length && !isNaN(tokens[i])) {
+            const id = tokens[i];
+            userMap[name] = id;
+            console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
+            if (rivalNames.includes(name)) {
+                detectedRivals.push(name);
+                console.log(`Detected rival [${connection.botId}]: ${name} with ID ${id}`);
+            }
+            i++;
+        } else if (hasPrefix) {
+            i--;
+        }
+    }
+    
+    if (detectedRivals.length > 0) {
+        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.join(', ')} - Defence mode activated`);
+        handleRivals(detectedRivals, 'defence', connection);
+    } else {
+        console.log(`No rivals detected in 353 [${connection.botId}], continuing to monitor`);
+    }
+    
+    return detectedRivals.length > 0;
+}
+
+// Handle JOIN command
+function handleJoinCommand(parts, connection) {
+    if (parts.length >= 4) {
+        let prefix = "";
+        let name = "";
+        let id = "";
+        
+        if (parts.length >= 5 && !isNaN(parts[3])) {
+            prefix = parts[1];
+            name = parts[2];
+            id = parts[3];
+        } else {
+            name = parts[1];
+            id = parts[2];
+        }
+        
+        userMap[name] = id;
+        console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
+        
+        if (rivalNames.includes(name)) {
+            console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated`);
+            handleRivals([name], 'attack', connection);
+        }
     }
 }
 
-async function restartMonitoring(payloadData) {
-    if (stopMonitoring || !page || page.isClosed()) {
-        console.log("[Puppeteer] Skipping restart (stop signal or page closed).");
+function remove_user(user) {
+    if (userMap[user]) {
+        delete userMap[user];
+        console.log(`Removed user ${user} from userMap`);
+    }
+}
+
+async function warmConnectionPool() {
+    if (poolWarmupInProgress) {
+        console.log("Pool warmup already in progress, skipping");
         return;
     }
-
-    console.log('[Puppeteer] Restarting monitoring cycle...');
+    
     try {
-        if (cdpClient) {
-            await cdpClient.removeAllListeners();
-            await cdpClient.detach().catch(e => console.warn("Warning: Error detaching CDP client before reload:", e.message));
-            cdpClient = null;
+        poolWarmupInProgress = true;
+        console.log(`Warming connection pool (current size: ${connectionPool.length}/${MAX_POOL_SIZE})`);
+        
+        const now = Date.now();
+        const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes
+        for (let i = connectionPool.length - 1; i >= 0; i--) {
+            const conn = connectionPool[i];
+            if (now - conn.lastUsed > STALE_THRESHOLD || 
+                (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY)) {
+                console.log(`Pruning connection ${conn.botId || 'none'} from pool (State: ${conn.state}, Age: ${(now - conn.createdAt)/1000}s)`);
+                conn.cleanup();
+                connectionPool.splice(i, 1);
+            }
         }
-
-        console.log('[Puppeteer] Reloading page (waitUntil: domcontentloaded)...');
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-        console.log('[Puppeteer] Page reload initiated, DOMContentLoaded likely fired.');
-
-        await page.waitForFunction(() => window.tampermonkeyReady === true, { timeout: 30000 });
-        console.log('[Puppeteer] Tampermonkey script is ready after reload.');
-
-        await checkCurrentPlanetAndAct(payloadData);
-
-        // *** Optimization 2: Parallel Configuration Update and WebSocket Setup ***
-        console.log('[Puppeteer] Updating configuration and setting up WebSocket listener in parallel...');
-        await Promise.all([
-            page.evaluate(async (names, planet, params) => {
-                if (typeof window.GM_setValue !== 'function') {
-                    console.error('[Browser] GM_setValue function not found after reload!');
-                    return;
+        
+        const connectionsToAdd = Math.max(0, MAX_POOL_SIZE - connectionPool.length);
+        if (connectionsToAdd > 0) {
+            console.log(`Adding ${connectionsToAdd} new warm connection(s) to pool`);
+            const batchSize = 5;
+            for (let batch = 0; batch < Math.ceil(connectionsToAdd / batchSize); batch++) {
+                const batchPromises = [];
+                const batchStart = batch * batchSize;
+                const batchEnd = Math.min((batch + 1) * batchSize, connectionsToAdd);
+                for (let i = batchStart; i < batchEnd; i++) {
+                    const conn = createConnection();
+                    batchPromises.push((async () => {
+                        try {
+                            console.log(`Initializing pool connection ${i+1}/${connectionsToAdd} (warm mode)`);
+                            await conn.initialize(true);
+                            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
+                                connectionPool.push(conn);
+                                console.log(`Added new warm connection to pool (total: ${connectionPool.length}/${MAX_POOL_SIZE})`);
+                                return true;
+                            } else {
+                                console.warn(`Connection reached end of initialization but state is ${conn.state}, not adding to pool`);
+                                conn.cleanup();
+                                return false;
+                            }
+                        } catch (error) {
+                            console.error(`Failed to initialize connection for pool:`, error.message || error);
+                            conn.cleanup();
+                            return false;
+                        }
+                    })());
                 }
-                await window.GM_setValue('RIVAL_NAMES', names);
-                await window.GM_setValue('PLANET_NAME', planet);
-                await window.GM_setValue('TIMING_PARAMS', JSON.stringify(params));
-                console.log('[Browser] Configuration stored via GM_setValue.');
-            }, rivalNames, planetName, timingParams),
-            setupWebSocketListener()
-        ]);
-        console.log('[Puppeteer] Parallel setup tasks completed.');
-        console.log('[Puppeteer] Restart monitoring cycle setup complete.');
-
-    } catch (reloadError) {
-        console.error('[Puppeteer] Error during page reload/restart sequence:', reloadError);
-        await takeScreenshotOnError(page);
-        console.log('[Puppeteer] Critical error during reload/restart. Stopping monitoring and closing browser.');
-        stopMonitoring = true;
-        if (browser) {
-            await browser.close().catch(e => console.error("Error closing browser after reload failure:", e));
-            browser = null;
+                await Promise.allSettled(batchPromises);
+            }
         }
-        process.exit(1);
+        console.log(`Connection pool warm-up complete. Pool size: ${connectionPool.length}/${MAX_POOL_SIZE}`);
+    } catch (err) {
+        console.error("Error in warmConnectionPool:", err);
+    } finally {
+        poolWarmupInProgress = false;
     }
 }
 
-async function takeScreenshotOnError(pageInstance) {
-    if (pageInstance && !pageInstance.isClosed()) {
-        const screenshotPath = path.join(__dirname, `error_screenshot_${Date.now()}.png`);
-        try {
-            await pageInstance.screenshot({ path: screenshotPath, fullPage: true });
-            console.log(`Screenshot saved to ${screenshotPath}`);
-        } catch (ssError) {
-            console.error(`Failed to take screenshot: ${ssError.message}`);
+async function getConnection(activateFromPool = true) {
+    console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
+    if (activeConnection && activeConnection.state === CONNECTION_STATES.READY) {
+        console.log(`Reusing existing active connection ${activeConnection.botId}`);
+        return activeConnection;
+    }
+    
+    const warmConnections = connectionPool.filter(conn => 
+        conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData);
+    console.log(`Warm connections available: ${warmConnections.length}/${connectionPool.length}`);
+    
+    let chosenConn = null;
+    if (activateFromPool && warmConnections.length > 0) {
+        let oldestIdx = -1;
+        let oldestTime = Date.now();
+        for (let i = 0; i < connectionPool.length; i++) {
+            const conn = connectionPool[i];
+            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
+                if (conn.createdAt < oldestTime) {
+                    oldestTime = conn.createdAt;
+                    oldestIdx = i;
+                }
+            }
         }
+        if (oldestIdx !== -1) {
+            chosenConn = connectionPool[oldestIdx];
+            connectionPool.splice(oldestIdx, 1);
+            console.log(`⚡ Using warm connection from pool (pool size now: ${connectionPool.length}/${MAX_POOL_SIZE})`);
+            try {
+                console.time('warmActivation');
+                await chosenConn.activateWarmConnection();
+                console.timeEnd('warmActivation');
+                activeConnection = chosenConn;
+                Promise.resolve().then(() => {
+                    warmConnectionPool().catch(err => {
+                        console.error("Error warming connection pool after using connection:", err);
+                    });
+                });
+                return chosenConn;
+            } catch (error) {
+                console.error("Failed to activate warm connection:", error.message || error);
+                chosenConn.cleanup();
+            }
+        } else {
+            console.log("No suitable warm connections in pool");
+        }
+    } else if (!activateFromPool) {
+        console.log("Not using pool for this connection (monitoring mode)");
+    }
+    
+    console.log("Creating new active connection");
+    const newConn = createConnection();
+    try {
+        await newConn.initialize(false);
+        activeConnection = newConn;
+        return newConn;
+    } catch (error) {
+        console.error("Failed to create new connection:", error.message || error);
+        Promise.resolve().then(() => {
+            warmConnectionPool().catch(err => {
+                console.error("Error warming connection pool after connection failure:", err);
+            });
+        });
+        throw error;
+    }
+}
+
+async function getMonitoringConnection() {
+    return getConnection(false);
+}
+
+async function tryReconnectWithBackoff() {
+    reconnectAttempt++;
+    const backoffTime = Math.min(RECONNECT_BACKOFF_BASE * Math.pow(1.5, reconnectAttempt - 1), 3000);
+    console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff...`);
+    return new Promise((resolve, reject) => {
+        setTimeout(async () => {
+            try {
+                const conn = await getConnection(true);
+                resolve(conn);
+            } catch (error) {
+                console.error(`Reconnect attempt ${reconnectAttempt} failed:`, error.message || error);
+                if (reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
+                    try {
+                        const conn = await tryReconnectWithBackoff();
+                        resolve(conn);
+                    } catch (err) {
+                        reject(err);
+                    }
+                } else {
+                    console.error(`Giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`);
+                    reconnectAttempt = 0;
+                    reject(new Error("Maximum reconnection attempts reached"));
+                }
+            }
+        }, backoffTime);
+    });
+}
+
+warmConnectionPool().catch(err => {
+    console.error("Error during initial connection pool warm-up:", err);
+});
+
+setInterval(() => {
+    if (!poolWarmupInProgress) {
+        warmConnectionPool().catch(err => {
+            console.error("Error warming connection pool:", err);
+        });
+    }
+}, 20000);
+
+function updateTimingValue(type) {
+    if (type === 'attack') {
+        currentAttackTime += config.attackIntervalTime;
+        if (currentAttackTime > config.stopAttackTime) {
+            currentAttackTime = config.startAttackTime;
+        }
+        console.log(`Updated attack time to: ${currentAttackTime}ms`);
+        return currentAttackTime;
     } else {
-        console.log("Skipping screenshot: Page is closed or not available.");
+        currentDefenceTime += config.defenceIntervalTime;
+        if (currentDefenceTime > config.stopDefenceTime) {
+            currentDefenceTime = config.startDefenceTime;
+        }
+        console.log(`Updated defence time to: ${currentDefenceTime}ms`);
+        return currentDefenceTime;
     }
 }
 
-process.on('SIGINT', async () => {
-    console.log('\n[Puppeteer] SIGINT received. Shutting down gracefully...');
-    stopMonitoring = true;
-    if (cdpClient) {
-        console.log('[Puppeteer] Detaching CDP client...');
-        await cdpClient.detach().catch(e => console.error("Error detaching CDP on SIGINT:", e.message));
+async function handleRivals(rivals, mode, connection) {
+    if (!connection.botId || rivals.length === 0) {
+        console.log(`No rivals to handle or bot ID not set`);
+        return;
     }
-    if (browser) {
-        console.log('[Puppeteer] Closing browser...');
-        await browser.close();
-        browser = null;
+    
+    const waitTime = mode === 'attack' ? currentAttackTime : currentDefenceTime;
+    console.log(`Handling rivals in ${mode} mode with wait time: ${waitTime}ms [${connection.botId}]`);
+    
+    monitoringMode = false;
+    
+    for (const rival of rivals) {
+        const id = userMap[rival];
+        if (id) {
+            await new Promise(resolve => {
+                setTimeout(() => {
+                    connection.send(`ACTION 3 ${id}`);
+                    resolve();
+                }, waitTime);
+            });
+            console.log(`Completed actions on ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+        }
     }
-    console.log('[Puppeteer] Shutdown complete.');
+    
+    updateTimingValue(mode);
+    connection.send(`QUIT :ds`);
+    monitoringMode = true;
+    
+    if (activeConnection === connection) {
+        activeConnection = null;
+    }
+    
+    console.log("⚡ Actions completed, immediately activating warm connection");
+    Promise.resolve().then(async () => {
+        try {
+            console.time('reconnectAfterAction');
+            await getConnection(true);
+            console.timeEnd('reconnectAfterAction');
+        } catch (error) {
+            console.error("Failed to get new connection after rival handling:", error.message || error);
+            tryReconnectWithBackoff().catch(retryError => {
+                console.error("All reconnection attempts failed:", retryError.message || retryError);
+            });
+        }
+    });
+}
+
+async function recoverUser(password) {
+    console.log("Starting recovery with code:", password);
+    await warmConnectionPool().catch(err => {
+        console.error("Initial pool warm-up failed:", err.message || err);
+    });
+    try {
+        await getMonitoringConnection();
+        console.log("Initial monitoring connection established successfully");
+    } catch (error) {
+        console.error("Failed to establish initial monitoring connection:", error.message || error);
+        setTimeout(() => {
+            recoverUser(password);
+        }, 1000);
+    }
+}
+
+async function maintainMonitoringConnection() {
+    if (monitoringMode && (!activeConnection || activeConnection.state !== CONNECTION_STATES.READY)) {
+        console.log("Maintaining monitoring connection...");
+        try {
+            await getMonitoringConnection();
+        } catch (error) {
+            console.error("Failed to maintain monitoring connection:", error.message || error);
+            setTimeout(() => {
+                maintainMonitoringConnection();
+            }, 5000);
+        }
+    }
+}
+
+setInterval(() => {
+    maintainMonitoringConnection();
+}, 30000);
+
+recoverUser(recoveryCode);
+
+process.on('SIGINT', () => {
+    console.log("Shutting down...");
+    connectionPool.forEach(conn => {
+        conn.cleanup();
+    });
+    if (activeConnection) {
+        activeConnection.cleanup();
+    }
     process.exit(0);
 });
 
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught exception:', error.message || error);
+    if (activeConnection) {
+        activeConnection.cleanup();
+        activeConnection = null;
+    }
+    setTimeout(() => {
+        if (monitoringMode) {
+            getMonitoringConnection().catch(err => {
+                console.error("Failed to get new monitoring connection after uncaught exception:", err.message || err);
+            });
+        } else {
+            getConnection(true).catch(err => {
+                console.error("Failed to get new connection after uncaught exception:", err.message || err);
+            });
+        }
+    }, 1000);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    if (activeConnection) {
+        activeConnection.cleanup();
+        activeConnection = null;
+    }
+    setTimeout(() => {
+        if (monitoringMode) {
+            getMonitoringConnection().catch(err => {
+                console.error("Failed to get new monitoring connection after unhandled rejection:", err.message || err);
+            });
+        } else {
+            getConnection(true).catch(err => {
+                console.error("Failed to get new connection after unhandled rejection:", err.message || err);
+            });
+        }
+    }, 1000);
+});
