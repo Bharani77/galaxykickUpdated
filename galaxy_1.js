@@ -1,9 +1,11 @@
+const puppeteer = require('puppeteer');
 const WebSocket = require('ws');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const CryptoJS = require('crypto-js');
 
 // Configuration
+let prisonAutomationInProgress = false;
 let config;
 let rivalNames = [];
 let recoveryCode;
@@ -110,6 +112,10 @@ function createConnection() {
         },
         
         initialize: function(stopAtHash = false) {
+            if (prisonAutomationInProgress) {
+                console.log(`Prison automation in progress, deferring connection.initialize() for ${this.botId || 'new connection'}.`);
+                return Promise.reject(new Error("Prison automation in progress")); // Reject to prevent further processing
+            }
             if (this.initPromise) {
                 return this.initPromise;
             }
@@ -403,8 +409,41 @@ function createConnection() {
 }
 
 // Parse 353 command (user list)
-function parse353(payload, connection) {
+async function parse353(payload, connection) {
     console.log(`Parsing 353 payload [${connection.botId}]: ${payload}`);
+
+    if (payload.includes('Prison')) {
+        console.log(`"Prison" keyword detected in 353 payload [${connection.botId}]`);
+        
+        if (prisonAutomationInProgress) {
+            console.log(`Prison automation already in progress, skipping new trigger [${connection.botId}]`);
+            return;
+        }
+
+        prisonAutomationInProgress = true;
+        console.log(`Set prisonAutomationInProgress = true [${connection.botId}]`);
+
+        if (connection && typeof connection.send === 'function') {
+            connection.send('QUIT :ds');
+            console.log(`Sent QUIT :ds via connection [${connection.botId}]`);
+        }
+
+        try {
+            console.log(`Starting prison automation from parse353 [${connection.botId}]...`);
+            const automationResult = await runPrisonAutomation();
+            console.log(`Prison automation result [${connection.botId}]:`, automationResult);
+        } catch (error) {
+            console.error(`Error during runPrisonAutomation call from parse353 [${connection.botId}]:`, error);
+        } finally {
+            console.log(`Setting prisonAutomationInProgress = false [${connection.botId}]`);
+            prisonAutomationInProgress = false;
+            // Attempt to reconnect after automation is done or failed
+            console.log(`Attempting to reconnect after prison automation [${connection.botId}]...`);
+            getConnection(true).catch(err => console.error(`Failed to reconnect after prison automation [${connection.botId}]:`, err));
+        }
+        return; // Return early to prevent normal rival detection logic
+    }
+
     const tokens = payload.split(' ');
     let i = 0;
     let detectedRivals = [];
@@ -541,6 +580,14 @@ async function warmConnectionPool() {
 }
 
 async function getConnection(activateFromPool = true) {
+    if (prisonAutomationInProgress) {
+        console.log('Prison automation in progress, deferring getConnection.');
+        // It's important to return a promise that perhaps never resolves or rejects,
+        // or rejects with a specific "automation in progress" error,
+        // to prevent downstream logic from proceeding as if a connection was obtained.
+        // For now, let's return a promise that won't resolve, to halt dependent operations.
+        return new Promise(() => {}); 
+    }
     console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
     if (activeConnection && activeConnection.state === CONNECTION_STATES.READY) {
         console.log(`Reusing existing active connection ${activeConnection.botId}`);
@@ -612,6 +659,10 @@ async function getMonitoringConnection() {
 }
 
 async function tryReconnectWithBackoff() {
+    if (prisonAutomationInProgress) {
+        console.log('Prison automation in progress, deferring tryReconnectWithBackoff.');
+        return Promise.resolve(); // Return a resolved promise to not break promise chains
+    }
     reconnectAttempt++;
     const backoffTime = Math.min(RECONNECT_BACKOFF_BASE * Math.pow(1.5, reconnectAttempt - 1), 3000);
     console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff...`);
@@ -670,6 +721,10 @@ function updateTimingValue(type) {
 }
 
 async function handleRivals(rivals, mode, connection) {
+    if (prisonAutomationInProgress) {
+        console.log(`Prison automation in progress, deferring handleRivals for ${rivals.join(', ')} in ${mode} mode.`);
+        return;
+    }
     if (!connection.botId || rivals.length === 0) {
         console.log(`No rivals to handle or bot ID not set`);
         return;
@@ -718,9 +773,14 @@ async function handleRivals(rivals, mode, connection) {
 
 async function recoverUser(password) {
     console.log("Starting recovery with code:", password);
+
+    // Removed call to runPrisonAutomation() from here as it's now triggered by parse353
+
     await warmConnectionPool().catch(err => {
         console.error("Initial pool warm-up failed:", err.message || err);
     });
+    
+    // Proceed with normal IRC connection logic
     try {
         await getMonitoringConnection();
         console.log("Initial monitoring connection established successfully");
@@ -733,6 +793,10 @@ async function recoverUser(password) {
 }
 
 async function maintainMonitoringConnection() {
+    if (prisonAutomationInProgress) {
+        console.log('Prison automation in progress, deferring maintainMonitoringConnection.');
+        return;
+    }
     if (monitoringMode && (!activeConnection || activeConnection.state !== CONNECTION_STATES.READY)) {
         console.log("Maintaining monitoring connection...");
         try {
@@ -800,3 +864,76 @@ process.on('unhandledRejection', (reason, promise) => {
         }
     }, 1000);
 });
+
+async function runPrisonAutomation() {
+    let browser;
+    console.log('Starting prison automation...');
+    try {
+        browser = await puppeteer.launch({
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage', // Common in Docker/CI
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu' // Often necessary in headless
+            ],
+            dumpio: process.env.DEBUG === 'true' // Pipe browser I/O to process for debugging
+        });
+        const page = await browser.newPage();
+
+        console.log('Navigating to https://galaxy.mobstudio.ru/web/');
+        await page.goto('https://galaxy.mobstudio.ru/web/', { waitUntil: 'networkidle0', timeout: 60000 });
+        
+        let onPrisonScriptDoneCallback;
+        const prisonScriptPromise = new Promise(resolve => {
+            onPrisonScriptDoneCallback = (status) => {
+                console.log(`onPrisonScriptDone called with status: ${status}`);
+                resolve(status); // Resolve with the status directly
+            };
+        });
+
+        await page.exposeFunction('onPrisonScriptDone', onPrisonScriptDoneCallback);
+
+        const prisonScriptContent = await fs.readFile('prison.user_1.js', 'utf8');
+        console.log('Successfully read prison.user_1.js');
+        
+        await page.evaluate(prisonScriptContent);
+        console.log('Prison script injected and evaluated.');
+        
+        const timeoutPromise = new Promise((resolve) => {
+            const fiveMinutes = 5 * 60 * 1000;
+            setTimeout(() => resolve({ status: 'TIMEOUT', message: 'Prison automation timed out after 5 minutes.' }), fiveMinutes);
+        });
+
+        console.log('Waiting for prison script to complete or timeout...');
+        const result = await Promise.race([prisonScriptPromise, timeoutPromise]);
+        
+        if (typeof result === 'string') {
+            console.log(`Prison automation finished with result: ${result}`);
+            return result; 
+        } else if (result && typeof result.status !== 'undefined') {
+            console.log(`Prison automation finished with status: ${result.status}, message: ${result.message || 'N/A'}`);
+            return result; 
+        } else {
+            console.warn(`Prison automation finished with unexpected result type: ${JSON.stringify(result)}`);
+            return { status: 'UNKNOWN_RESULT', message: 'The script finished with an unknown result type.'};
+        }
+
+    } catch (error) {
+        console.error('Error during prison automation:', error); // More generic error message here
+        return { status: 'ERROR', message: error.message };
+    } finally {
+        if (browser) {
+            try {
+                console.log('Closing browser (after launch/navigation attempt)...');
+                await browser.close();
+            } catch (closeError) {
+                console.error('Error closing browser:', closeError);
+            }
+        }
+        console.log('Prison automation attempt (launch/navigation) finished.');
+    }
+}

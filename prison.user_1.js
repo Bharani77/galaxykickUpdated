@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Galaxy Web Combined Automation Sequence
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  Automates a sequence of clicks on galaxy.mobstudio.ru/web, handling waits and iframes using XPath.
+// @version      1.3
+// @description  Automates a sequence of clicks on galaxy.mobstudio.ru/web, handling waits and iframes using XPath, and reports status via window.onPrisonScriptDone.
 // @author       Your Name (Merged & Refined by AI)
 // @match        https://galaxy.mobstudio.ru/web/*
 // @grant        none
@@ -278,33 +278,29 @@
             console.log("Galaxy Combined Automation Script: Full sequence completed successfully.");
             
             // Notify Puppeteer that the script has completed successfully
-            if (typeof window.notifyPrisonScriptComplete === 'function') {
-                window.notifyPrisonScriptComplete('SUCCESS');
-                // Clear the timeout if it was set
-                if (window.prisonTimeoutId) {
-                    clearTimeout(window.prisonTimeoutId);
-                }
+            if (typeof window.onPrisonScriptDone === 'function') {
+                window.onPrisonScriptDone('SUCCESS');
+            } else {
+                console.error('Puppeteer callback function window.onPrisonScriptDone not found! Cannot report SUCCESS.');
+            }
+            // Clear the timeout if it was set (though Puppeteer side should handle timeout promise resolution)
+            if (window.prisonTimeoutId) {
+                clearTimeout(window.prisonTimeoutId);
             }
 
         } catch (error) {
             console.error("Galaxy Combined Automation Script: An error occurred during the sequence:", error);
             
             // Notify Puppeteer of the error
-            if (typeof window.notifyPrisonScriptComplete === 'function') {
-                window.notifyPrisonScriptComplete('ERROR: ' + error.message);
-                // Clear the timeout if it was set
-                if (window.prisonTimeoutId) {
-                    clearTimeout(window.prisonTimeoutId);
-                }
+            if (typeof window.onPrisonScriptDone === 'function') {
+                window.onPrisonScriptDone('ERROR: ' + error.message);
+            } else {
+                console.error('Puppeteer callback function window.onPrisonScriptDone not found! Cannot report ERROR.');
             }
-			// Inside the catch block:
-			if (typeof window.notifyPrisonScriptComplete === 'function') {
-				window.notifyPrisonScriptComplete('ERROR: ' + error.message);
-				// Clear the timeout if it was set
-				if (window.prisonTimeoutId) {
-					clearTimeout(window.prisonTimeoutId);
-				}
-			}
+            // Clear the timeout if it was set
+            if (window.prisonTimeoutId) {
+                clearTimeout(window.prisonTimeoutId);
+            }
         }
     }
 
