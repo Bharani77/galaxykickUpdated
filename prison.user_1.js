@@ -1,18 +1,22 @@
 // ==UserScript==
 // @name         Galaxy Web Combined Automation Sequence
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.4
 // @description  Automates a sequence of clicks on galaxy.mobstudio.ru/web, handling waits and iframes using XPath.
 // @author       Your Name (Merged & Refined by AI)
 // @match        https://galaxy.mobstudio.ru/web/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
-
 (function() {
     'use strict';
 
     console.log("Galaxy Combined Automation Script: Initializing...");
+
+    // --- Settings from main script ---
+    let recoveryCode = "";
+    let planetName = "";
+    let isFirstTimeInPrison = true; // Flag to track if this is the first prison visit
 
     // --- Helper Functions ---
 
@@ -152,57 +156,156 @@
         });
     }
 
-    // --- Function to get the planet name from storage ---
-    async function getPlanetName() {
-        // Try to get planet name from window.GM_getValue if available
+    
+    // --- Function to get data from window.PRISON_AUTOMATION_DATA ---
+    async function getAutomationData() {
         try {
-            if (typeof window.GM_getValue === 'function') {
-                const planetName = await window.GM_getValue('PLANET_NAME', '');
-                console.log(`Retrieved planet name from storage: "${planetName}"`);
-                return planetName || '';
+            // Wait for data to be available
+            
+            const data = JSON.parse(localStorage.getItem('PRISON_AUTOMATION_DATA') || '{}');
+			recoveryCode = data.recoveryCode || "";
+			planetName = data.planetName || "";
+            
+            console.log(`Retrieved data from window.PRISON_AUTOMATION_DATA:`);
+            console.log(`- planetName: "${planetName}"`);
+            
+            // Log redacted recovery code for security
+            if (recoveryCode) {
+                const maskedCode = recoveryCode.substring(0, 2) + 
+                                  "*".repeat(Math.max(0, recoveryCode.length - 4)) + 
+                                  recoveryCode.substring(recoveryCode.length - 2);
+                console.log(`- recoveryCode: "${maskedCode}"`);
             } else {
-                console.warn('GM_getValue function not available for retrieving planet name');
-                return '';
+                console.log(`- recoveryCode: not available`);
             }
+            
+            // Check if we've been here before by looking for a session flag
+            const isPrisonVisited = localStorage.getItem('prisonVisited') === 'true';
+            if (isPrisonVisited) {
+                isFirstTimeInPrison = false;
+                console.log("Not first time in prison - will need to refresh browser first");
+            } else {
+                localStorage.setItem('prisonVisited', 'true');
+                console.log("First time in prison - no refresh needed");
+            }
+            
         } catch (error) {
-            console.error('Error retrieving planet name:', error);
-            return '';
+            console.error('Error retrieving automation data:', error);
         }
+    }
+    
+    // --- Browser refresh function ---
+    async function refreshBrowserAndContinue() {
+        console.log("Refreshing browser before prison automation...");
+        location.reload();
+        // The script will be reloaded, so we'll continue from the beginning
+        return new Promise(() => {}); // Never resolves since we're reloading
     }
 
     // --- Main Automation Logic ---
     async function performAutomationSequence() {
         try {
             console.log("Galaxy Combined Automation Script: Starting automation sequence...");
+
+            // Get the automation data (recoveryCode and planetName)
+            await getAutomationData();
             
-            // Get the planet name at the beginning
-            const planetName = await getPlanetName();
-            console.log(`Using planet name: "${planetName}"`);
+            // If not first time in prison, refresh the browser first
+            if (!isFirstTimeInPrison) {
+                console.log("Not first time in prison - refreshing browser");
+                //await refreshBrowserAndContinue();
+                //return; // We won't get here - browser will refresh
+            }
+
+            // Skip login if not needed (after refresh)
+            let needsLogin = localStorage.getItem('skipLoginAfterRefresh') !== 'true';
+            if (!needsLogin) {
+                console.log("Skipping login steps after refresh");
+                localStorage.removeItem('skipLoginAfterRefresh'); // Reset for next time
+            } else if (isFirstTimeInPrison) {
+                // Set flag to skip login if we refresh
+                localStorage.setItem('skipLoginAfterRefresh', 'true');
+                
+                // Only proceed with login if recovery code is available
+                if (!recoveryCode) {
+                    console.error("Cannot proceed with login: Recovery code not available");
+                    if (typeof window.notifyPrisonScriptComplete === 'function') {
+                        window.notifyPrisonScriptComplete('ERROR: Recovery code not available');
+                        if (window.prisonTimeoutId) {
+                            clearTimeout(window.prisonTimeoutId);
+                        }
+                    }
+                    return;
+                }
+                
+                // === Login Steps ===
+                console.log("--- Login Steps Start ---");
+
+                // 1. Wait for and click the black secondary button
+                console.log("Login: Waiting for black secondary button...");
+                const blackSecondaryButton = await waitForElementCSS(".mdc-button--black-secondary > .mdc-button__label", document, 15000);
+                console.log("Login: Clicking black secondary button:", blackSecondaryButton);
+                blackSecondaryButton.click();
+                await delay(500); // Small delay after click
+
+                // 2. Wait for and interact with the recoveryCode input
+                console.log("Login: Waiting for recoveryCode input...");
+                const recoveryCodeInput = await waitForElementCSS("input[name='recoveryCode']", document, 15000);
+                console.log("Login: Clicking recoveryCode input:", recoveryCodeInput);
+                recoveryCodeInput.click();
+                await delay(200); // Small delay after click
+
+                console.log(`Login: Sending recovery code to input...`);
+                recoveryCodeInput.value = recoveryCode; // Set the input value from global var
+                recoveryCodeInput.dispatchEvent(new Event('input', { bubbles: true })); // Trigger input event
+                await delay(200); // Small delay after input
+
+                console.log("Login: Sending Enter key to recoveryCode input...");
+                // Dispatch a sequence of keyboard events for better compatibility
+                const keyEvents = [
+                    new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 }),
+                    new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 }),
+                    new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 })
+                ];
+                keyEvents.forEach(event => recoveryCodeInput.dispatchEvent(event));
+
+                // Fallback: Trigger form submission if the input is inside a form
+                const parentForm = recoveryCodeInput.closest('form');
+                if (parentForm) {
+                    console.log("Login: Found parent form, triggering submit event...");
+                    parentForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                } else {
+                    console.log("Login: No parent form found, relying on keyboard events.");
+                }
+                await delay(1000); // Wait for potential form submission or page update
+
+                console.log("--- Login Steps Completed Successfully ---");
+            }
 
             // === Sequence Part 1 (from XPath Mod script) ===
             console.log("--- Part 1 Start ---");
 
-            // 1. Wait for and click the top bar title button (using CSS)
+            // 3. Wait for and click the top bar title button (using CSS)
             console.log("Part 1: Waiting for top bar button...");
             const topBarButton = await waitForElementCSS(".mdc-button > .mdc-top-app-bar__title", document);
             console.log("Part 1: Clicking top bar button:", topBarButton);
             topBarButton.click();
-           // await delay(500); // Small delay after click
+            await delay(500); // Small delay after click
 
-            // 2. Wait for and click the first list item (using CSS)
+            // 4. Wait for and click the first list item (using CSS)
             console.log("Part 1: Waiting for list item...");
             const listItem = await waitForElementCSS(".-list > .mdc-list-item:nth-child(1) > .mdc-list-item__text", document);
             console.log("Part 1: Clicking list item:", listItem);
             listItem.click();
             await delay(1500); // Wait for potential content load
 
-            // 3. Wait for the specific iframe (index 1) and get its document
+            // 5. Wait for the specific iframe (index 1) and get its document
             const frameIndex1 = 1; // Second iframe (0-based index)
             console.log(`Part 1: Waiting for iframe index ${frameIndex1} and its document...`);
             const { frameDocument: frameDoc1 } = await waitForFrameAndGetDocument(frameIndex1); // Destructure to get frameDocument
-           // await delay(1000); // Allow frame content to settle
+            await delay(1500); // Allow frame content to settle
 
-            // 4. Wait for and click the element *inside* the iframe using XPath
+            // 6. Wait for and click the element *inside* the iframe using XPath
             const targetXPath1 = "//h1[contains(.,'Diamond Prison Escape')]";
             console.log(`Part 1: Waiting for element inside frame ${frameIndex1} with XPath: ${targetXPath1}`);
             const elementInFrame1 = await waitForElementXPath(targetXPath1, frameDoc1); // Pass frameDoc1 as context
@@ -212,50 +315,45 @@
 
             console.log("--- Part 1 Completed Successfully ---");
 
-
             // === Sequence Part 2 (from Bot Automator script) ===
-            // Assumes the previous actions have set up the state for these steps in the main document or a *new* frame context.
             console.log("--- Part 2 Start ---");
 
-            // 5. Click "Yes" paragraph (in the main document)
-            console.log("Part 2: Waiting for 'Yes' paragraph (main document)...");
+            // 7. Click "Yes" paragraph (in iframe 1)
+            console.log("Part 2: Waiting for 'Yes' paragraph (iframe 1)...");
             const targetXPath2 = "//p[contains(.,'Yes')]";
-            console.log(`Part 1: Waiting for element inside frame ${frameIndex1} with XPath: ${targetXPath2}`);
-            const elementInFrame2 = await waitForElementXPath(targetXPath2, frameDoc1); // Pass frameDoc1 as context
-            console.log(`Part 1: Clicking element inside frame ${frameIndex1}:`, elementInFrame2);
-            elementInFrame2.click(); // Clicking the found H1 element
-            console.log("Part 2: 'Yes' paragraph found, clicking...");
+            const yesElement = await waitForElementXPath(targetXPath2, frameDoc1, 15000); // Use frameDoc1 as context
+            console.log(`Part 2: Clicking 'Yes' paragraph inside frame ${frameIndex1}:`, yesElement);
+            yesElement.click();
+            await delay(500); // Small delay after click
 
-
-            // 6. Click the image inside the second button (in the main document)
+            // 8. Click the image inside the second button (in the main document)
             console.log("Part 2: Waiting for the second button's image (main document)...");
             const secondButtonImg = await waitForElementXPath("//button[2]/img", document);
             console.log("Part 2: Second button image found, clicking...");
             secondButtonImg.click();
             await delay(2000); // Wait for potential frame load/update
 
-            // 7. Wait for the third iframe (index 2) and get its document
+            // 9. Wait for the third iframe (index 2) and get its document
             const frameIndex2 = 1; // Third iframe (0-based index)
             console.log(`Part 2: Waiting for iframe index ${frameIndex2} and its document...`);
             const { frameDocument: frameDoc2 } = await waitForFrameAndGetDocument(frameIndex2); // Destructure to get frameDocument
             console.log(`Part 2: Switched context to iframe ${frameIndex2}'s document.`);
-            //await delay(2000); // Allow frame content to settle
+            await delay(2000); // Allow frame content to settle
 
-            // 8. Click "THE_BOT" inside the iframe (index 2) - now using the planet name if available
-            const botText = planetName ? planetName : "THE_BOT";
-            console.log(`Part 2: Waiting for '${botText}' element inside iframe ${frameIndex2}...`);
-            
+            // 10. Click planet name (or THE_BOT) inside the iframe
+            console.log(`Part 2: Waiting for '${planetName || "THE_BOT"}' element inside iframe ${frameIndex2}...`);
+
             // Use the planet name if available, otherwise fall back to "THE_BOT"
-            const botXPath = planetName ? 
-                `//b[contains(text(),'${planetName}')]` : 
+            const botXPath = planetName ?
+                `//b[contains(text(),'${planetName}')]` :
                 "//b[contains(.,'THE_BOT')]";
-                
+
             try {
                 const botElement = await waitForElementXPath(botXPath, frameDoc2, 5000); // Use frameDoc2 as context, shorter timeout
-                console.log(`Part 2: '${botText}' element found, clicking...`);
+                console.log(`Part 2: '${planetName || "THE_BOT"}' element found, clicking...`);
                 botElement.click();
             } catch (error) {
-                console.warn(`Could not find element with name '${botText}', falling back to THE_BOT...`);
+                console.warn(`Could not find element with name '${planetName}', falling back to THE_BOT...`);
                 // Fallback to THE_BOT if the planet name element wasn't found
                 const fallbackBotElement = await waitForElementXPath("//b[contains(.,'THE_BOT')]", frameDoc2);
                 console.log("Part 2: Fallback 'THE_BOT' element found, clicking...");
@@ -268,27 +366,23 @@
             const { frameDocument: frameDoc3 } = await waitForFrameAndGetDocument(frameIndex3); // Destructure to get frameDocument
             console.log(`Part 2: Switched context to iframe ${frameIndex3}'s document.`);
 
-            // 9. Click "Visit Planet" inside the iframe (index 2)
-            console.log(`Part 2: Waiting for 'Visit Planet' link inside iframe ${frameIndex3}...`);
-            const visitPlanetLink = await waitForElementXPath("//a[contains(text(),'Visit Planet')]", frameDoc3); // Use frameDoc2 as context
-            console.log("Part 2: 'Visit Planet' link found, clicking...");
-            visitPlanetLink.click();
+            // 11. Click "Visit Planet" inside the iframe (index 2)
+			console.log(`Part 2: Waiting for 'Visit Planet' link inside iframe ${frameIndex3}...`);
+			const visitPlanetLink = await waitForElementXPath("//a[contains(text(),'Visit Planet')]", frameDoc3); // Use frameDoc3 as context
+			console.log("Part 2: 'Visit Planet' link found, clicking...");
+			visitPlanetLink.click();
 
             console.log("--- Part 2 Completed Successfully ---");
             console.log("Galaxy Combined Automation Script: Full sequence completed successfully.");
-            
+
             // Notify Puppeteer that the script has completed successfully
             if (typeof window.notifyPrisonScriptComplete === 'function') {
                 window.notifyPrisonScriptComplete('SUCCESS');
-                // Clear the timeout if it was set
-                if (window.prisonTimeoutId) {
-                    clearTimeout(window.prisonTimeoutId);
-                }
             }
 
         } catch (error) {
             console.error("Galaxy Combined Automation Script: An error occurred during the sequence:", error);
-            
+
             // Notify Puppeteer of the error
             if (typeof window.notifyPrisonScriptComplete === 'function') {
                 window.notifyPrisonScriptComplete('ERROR: ' + error.message);
@@ -297,14 +391,6 @@
                     clearTimeout(window.prisonTimeoutId);
                 }
             }
-			// Inside the catch block:
-			if (typeof window.notifyPrisonScriptComplete === 'function') {
-				window.notifyPrisonScriptComplete('ERROR: ' + error.message);
-				// Clear the timeout if it was set
-				if (window.prisonTimeoutId) {
-					clearTimeout(window.prisonTimeoutId);
-				}
-			}
         }
     }
 

@@ -7,13 +7,14 @@ const CryptoJS = require('crypto-js');
 let config;
 let rivalNames = [];
 let recoveryCode;
-let userMap = {}; // Map of user names to IDs
+let userMap = {};
 let reconnectAttempt = 0;
+let currentMode = null;
 
 // Connection pool settings
-const MAX_POOL_SIZE = 20; // Increased from 5 to 20 as requested
+const MAX_POOL_SIZE = 2;
 const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_BACKOFF_BASE = 100; // Start with 100ms backoff
+const RECONNECT_BACKOFF_BASE = 100;
 const connectionPool = [];
 let activeConnection = null;
 let poolWarmupInProgress = false;
@@ -31,16 +32,15 @@ const CONNECTION_STATES = {
 // Attack and defense timing variables
 let currentAttackTime;
 let currentDefenceTime;
-let monitoringMode = true; // Flag to indicate if the bot should stay connected and monitor
+let monitoringMode = true;
 
 function updateConfigValues() {
     try {
-        delete require.cache[require.resolve('./config1.json')];
-        config = require('./config1.json');
+        delete require.cache[require.resolve('./config4.json')];
+        config = require('./config4.json');
         rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
         recoveryCode = config.RC;
         
-        // Reset timing values to their initial state
         currentAttackTime = config.startAttackTime;
         currentDefenceTime = config.startDefenceTime;
         
@@ -65,10 +65,8 @@ function updateConfigValues() {
     }
 }
 
-// Initial config load
 updateConfigValues();
 
-// Watch config file for changes
 fsSync.watch('config1.json', (eventType) => {
     if (eventType === 'change') {
         console.log('Config file changed, updating values...');
@@ -126,7 +124,7 @@ function createConnection() {
                     
                     this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", {
                         rejectUnauthorized: false,
-                        handshakeTimeout: 3000 // Reduced timeout
+                        handshakeTimeout: 3000
                     });
                     
                     this.connectionTimeout = setTimeout(() => {
@@ -134,7 +132,7 @@ function createConnection() {
                         this.authenticating = false;
                         this.cleanup();
                         reject(new Error("Connection initialization timeout"));
-                    }, 5000); // Reduced to 5 seconds
+                    }, 5000);
                     
                     this.socket.on('open', () => {
                         this.state = CONNECTION_STATES.CONNECTED;
@@ -303,6 +301,45 @@ function createConnection() {
                         }
                         this.cleanup();
                         break;
+                    case "850":
+                        if (payload.includes("3 секунд(ы)")) {
+                            if (currentMode) {
+                                if (currentMode === 'attack') {
+                                    currentAttackTime += config.attackIntervalTime;
+                                    if (currentAttackTime > config.stopAttackTime) {
+                                        currentAttackTime = config.startAttackTime;
+                                    }
+                                    console.log(`Hit 3-second rule in attack mode, increased attack time to: ${currentAttackTime}ms`);
+                                } else if (currentMode === 'defence') {
+                                    currentDefenceTime += config.defenceIntervalTime;
+                                    if (currentDefenceTime > config.stopDefenceTime) {
+                                        currentDefenceTime = config.startDefenceTime;
+                                    }
+                                    console.log(`Hit 3-second rule in defence mode, increased defence time to: ${currentDefenceTime}ms`);
+                                }
+                            }
+                        }
+                        break;
+                    case "999":
+                        console.log(`Received 999 response: ${message}`);
+                        /*
+                        if (payload.includes("Ваш Авторитет позволяет посадить") && currentMode) {
+                            if (currentMode === 'attack') {
+                                currentAttackTime -= config.attackIntervalTime;
+                                if (currentAttackTime < config.startAttackTime) {
+                                    currentAttackTime = config.startAttackTime;
+                                }
+                                console.log(`Success in attack mode, decreased attack time to: ${currentAttackTime}ms`);
+                            } else if (currentMode === 'defence') {
+                                currentDefenceTime -= config.defenceIntervalTime;
+                                if (currentDefenceTime < config.startDefenceTime) {
+                                    currentDefenceTime = config.startDefenceTime;
+                                }
+                                console.log(`Success in defence mode, decreased defence time to: ${currentDefenceTime}ms`);
+                            }
+                        }
+                        */
+                        break;
                 }
             } catch (err) {
                 console.error(`Error handling message [${this.botId || 'connecting'}]:`, err);
@@ -402,7 +439,6 @@ function createConnection() {
     return conn;
 }
 
-// Parse 353 command (user list)
 function parse353(payload, connection) {
     console.log(`Parsing 353 payload [${connection.botId}]: ${payload}`);
     const tokens = payload.split(' ');
@@ -444,7 +480,6 @@ function parse353(payload, connection) {
     return detectedRivals.length > 0;
 }
 
-// Handle JOIN command
 function handleJoinCommand(parts, connection) {
     if (parts.length >= 4) {
         let prefix = "";
@@ -488,7 +523,7 @@ async function warmConnectionPool() {
         console.log(`Warming connection pool (current size: ${connectionPool.length}/${MAX_POOL_SIZE})`);
         
         const now = Date.now();
-        const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes
+        const STALE_THRESHOLD = 5 * 60 * 1000;
         for (let i = connectionPool.length - 1; i >= 0; i--) {
             const conn = connectionPool[i];
             if (now - conn.lastUsed > STALE_THRESHOLD || 
@@ -651,30 +686,13 @@ setInterval(() => {
     }
 }, 20000);
 
-function updateTimingValue(type) {
-    if (type === 'attack') {
-        currentAttackTime += config.attackIntervalTime;
-        if (currentAttackTime > config.stopAttackTime) {
-            currentAttackTime = config.startAttackTime;
-        }
-        console.log(`Updated attack time to: ${currentAttackTime}ms`);
-        return currentAttackTime;
-    } else {
-        currentDefenceTime += config.defenceIntervalTime;
-        if (currentDefenceTime > config.stopDefenceTime) {
-            currentDefenceTime = config.startDefenceTime;
-        }
-        console.log(`Updated defence time to: ${currentDefenceTime}ms`);
-        return currentDefenceTime;
-    }
-}
-
 async function handleRivals(rivals, mode, connection) {
     if (!connection.botId || rivals.length === 0) {
         console.log(`No rivals to handle or bot ID not set`);
         return;
     }
     
+    currentMode = mode;
     const waitTime = mode === 'attack' ? currentAttackTime : currentDefenceTime;
     console.log(`Handling rivals in ${mode} mode with wait time: ${waitTime}ms [${connection.botId}]`);
     
@@ -685,23 +703,25 @@ async function handleRivals(rivals, mode, connection) {
         if (id) {
             await new Promise(resolve => {
                 setTimeout(() => {
+                    console.log(`Sending ACTION 3 to ${rival} (ID: ${id}) [${connection.botId}]`);
                     connection.send(`ACTION 3 ${id}`);
                     resolve();
                 }, waitTime);
             });
-            console.log(`Completed actions on ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+            console.log(`Actions sent to ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
         }
     }
     
-    updateTimingValue(mode);
-    connection.send(`QUIT :ds`);
-    monitoringMode = true;
-    
+    // Instead of QUIT, reload the WebSocket
+    console.log(`Reloading WebSocket connection [${connection.botId}]`);
+    connection.cleanup(); // Close the current connection
     if (activeConnection === connection) {
         activeConnection = null;
     }
     
-    console.log("⚡ Actions completed, immediately activating warm connection");
+    monitoringMode = true;
+    
+    console.log("⚡ Actions completed, immediately activating new connection");
     Promise.resolve().then(async () => {
         try {
             console.time('reconnectAfterAction');
