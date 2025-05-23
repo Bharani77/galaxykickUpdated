@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "crypto-js": "^4.2.0",
     "esm": "^3.2.25",
     "flask": "^0.2.10",
     "kill-port": "^2.0.1",
@@ -11,6 +12,6 @@
     "screenfull": "^6.0.2",
     "selenium-webdriver": "^4.23.0",
     "socket.io": "^4.7.5",
-    "ws": "^8.18.0"
+    "ws": "^8.18.2"
   }
 }

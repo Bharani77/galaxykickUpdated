@@ -1,1 +1,11 @@
-{"RC": "dw6hdn2xyb", "AttackTime": 1500, "DefenceTime": 1550, "planetName": "THE_BOT", "interval": 5, "rival": ["``THALA``"]}
+{
+  "RC": "",
+  "startAttackTime": 1955,
+  "stopAttackTime": 1975,
+  "attackIntervalTime": 5,
+  "startDefenceTime": 1955,
+  "stopDefenceTime": 1975,
+  "defenceIntervalTime": 5,
+  "planetName": "THE_BOT",
+  "rival": ["``THALA``"]
+}
