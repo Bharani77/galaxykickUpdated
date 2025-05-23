@@ -182,7 +182,13 @@ function createConnection() {
                             connectionPool.splice(index, 1);
                         }
                         if (this === activeConnection) {
-                            console.log("Active connection closed, getting new connection immediately");
+                            console.log("Active connection closed");
+                            if (pauseConnectionPoolManagement) {
+                                console.log("Connection closed during prison automation - NOT reconnecting automatically");
+                                activeConnection = null;
+                                return;
+                            }
+                            console.log("Getting new connection immediately");
                             activeConnection = null;
                             Promise.resolve().then(() => {
                                 return getConnection(true).catch(err => {
@@ -199,6 +205,8 @@ function createConnection() {
                             this.authenticating = false;
                             clearTimeout(this.connectionTimeout);
                             reject(error);
+                        } else if (pauseConnectionPoolManagement) {
+                            console.log("WebSocket error during prison automation - NOT attempting reconnection");
                         }
                     });
                 } catch (err) {
@@ -218,14 +226,21 @@ function createConnection() {
             try {
                 console.log(`Received [${this.botId || 'connecting'}]: ${message}`);
                 this.lastReceivedMessage = message;
-				
-				// Check for Prison mention in the message - add this code here
-				if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
-					console.log(`🔒 Prison mention detected: "${message}"`);
-					handlePrisonAutomation(this);
-					return; // Skip further processing for prison handling
-				}
-        
+                
+                if (pauseConnectionPoolManagement && !message.startsWith("PING")) {
+                    console.log("Message processing paused during prison automation (except PING)");
+                    if (message.startsWith("PING")) {
+                        this.send("PONG");
+                    }
+                    return;
+                }
+                
+                if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
+                    console.log(`🔒 Prison mention detected: "${message}"`);
+                    handlePrisonAutomation(this);
+                    return;
+                }
+                
                 const colonIndex = message.indexOf(" :");
                 let payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
                 const parts = message.split(/\s+/);
@@ -270,7 +285,6 @@ function createConnection() {
                         this.state = CONNECTION_STATES.AUTHENTICATED;
                         console.log(`Connection [${this.botId}] authenticated, sending setup commands...`);
                         
-                        // Store botId as planetName for prison automation
                         planetName = config.planetName;
                         console.log(`Set planetName to: ${planetName}`);
                         
@@ -316,12 +330,16 @@ function createConnection() {
                             this.cleanup();
                             console.log(`⚡ Got ${command} error, trying immediate recovery with warm connection...`);
                             reject(new Error(`Critical error ${command}`));
-                            Promise.resolve().then(() => {
-                                return getConnection(true).catch(err => {
-                                    console.error(`Failed to get warm connection after ${command} error:`, err);
-                                    return tryReconnectWithBackoff();
+                            if (!pauseConnectionPoolManagement) {
+                                Promise.resolve().then(() => {
+                                    return getConnection(true).catch(err => {
+                                        console.error(`Failed to get warm connection after ${command} error:`, err);
+                                        return tryReconnectWithBackoff();
+                                    });
                                 });
-                            });
+                            } else {
+                                console.log(`${command} error during prison automation - NOT reconnecting`);
+                            }
                             return;
                         }
                         this.cleanup();
@@ -448,18 +466,16 @@ function createConnection() {
 }
 
 function parse353(message, connection) {
-    // Extract payload using the same logic from handleMessage
     const colonIndex = message.indexOf(" :");
     const payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
     
     console.log(`Parsing 353 message [${connection.botId}]: ${message}`);
     console.log(`Parsed payload: ${payload}`);
     
-    // Check for Prison mention in the entire message
     if (message.includes('Prison') || message.includes('Тюрьма')) {
         console.log(`🔒 Prison mention detected: "${message}"`);
         handlePrisonAutomation(connection);
-        return false; // Skip rival detection for prison handling
+        return false;
     }
     
     const tokens = payload.split(' ');
@@ -668,6 +684,11 @@ async function getMonitoringConnection() {
 }
 
 async function tryReconnectWithBackoff() {
+    if (pauseConnectionPoolManagement) {
+        console.log("Reconnection paused during prison automation");
+        throw new Error("Reconnection paused during prison automation");
+    }
+    
     reconnectAttempt++;
     const backoffTime = Math.min(RECONNECT_BACKOFF_BASE * Math.pow(1.5, reconnectAttempt - 1), 3000);
     console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff...`);
@@ -803,6 +824,9 @@ async function handlePrisonAutomation(connection) {
         });
     }
 }
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 async function executePrisonAutomation() {
     console.log("Prison automation started...");
@@ -812,7 +836,7 @@ async function executePrisonAutomation() {
         if (!prisonBrowser || !prisonBrowser.isConnected()) {
             console.log("No active browser session found. Launching headless browser for prison automation...");
             prisonBrowser = await puppeteer.launch({
-                headless: false, // Consider making this configurable
+                headless: "new", // Consider making this configurable
                 args: ['--no-sandbox', '--disable-setuid-sandbox']
             });
             console.log("New browser instance created");
@@ -888,7 +912,7 @@ async function executePrisonAutomation() {
             }));
             // console.log('[Browser Context] PRISON_AUTOMATION_DATA set:', localStorage.getItem('PRISON_AUTOMATION_DATA'));
         }, currentRecoveryCode, currentPlanetName); //
-		
+        
         console.log(`Injecting prison automation script with planet name: ${currentPlanetName}`); //
         const userScriptContent = fsSync.readFileSync('./prison.user_1.js', 'utf8'); // Use sync version for simplicity here or await fs.readFile
         
@@ -1016,7 +1040,7 @@ process.on('SIGINT', () => {
     if (activeConnection) {
         activeConnection.cleanup();
     }
-	cleanupPrisonBrowser();
+    cleanupPrisonBrowser();
     process.exit(0);
 });
 

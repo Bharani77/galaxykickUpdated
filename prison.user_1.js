@@ -297,13 +297,13 @@
             const listItem = await waitForElementCSS(".-list > .mdc-list-item:nth-child(1) > .mdc-list-item__text", document);
             console.log("Part 1: Clicking list item:", listItem);
             listItem.click();
-            await delay(1500); // Wait for potential content load
+            await delay(2000); // Wait for potential content load
 
             // 5. Wait for the specific iframe (index 1) and get its document
             const frameIndex1 = 1; // Second iframe (0-based index)
             console.log(`Part 1: Waiting for iframe index ${frameIndex1} and its document...`);
             const { frameDocument: frameDoc1 } = await waitForFrameAndGetDocument(frameIndex1); // Destructure to get frameDocument
-            await delay(1500); // Allow frame content to settle
+            await delay(1000); // Allow frame content to settle
 
             // 6. Wait for and click the element *inside* the iframe using XPath
             const targetXPath1 = "//h1[contains(.,'Diamond Prison Escape')]";
@@ -331,14 +331,14 @@
             const secondButtonImg = await waitForElementXPath("//button[2]/img", document);
             console.log("Part 2: Second button image found, clicking...");
             secondButtonImg.click();
-            await delay(2000); // Wait for potential frame load/update
+            await delay(1200); // Wait for potential frame load/update
 
             // 9. Wait for the third iframe (index 2) and get its document
             const frameIndex2 = 1; // Third iframe (0-based index)
             console.log(`Part 2: Waiting for iframe index ${frameIndex2} and its document...`);
             const { frameDocument: frameDoc2 } = await waitForFrameAndGetDocument(frameIndex2); // Destructure to get frameDocument
             console.log(`Part 2: Switched context to iframe ${frameIndex2}'s document.`);
-            await delay(2000); // Allow frame content to settle
+            await delay(1200); // Allow frame content to settle
 
             // 10. Click planet name (or THE_BOT) inside the iframe
             console.log(`Part 2: Waiting for '${planetName || "THE_BOT"}' element inside iframe ${frameIndex2}...`);
@@ -371,7 +371,9 @@
 			const visitPlanetLink = await waitForElementXPath("//a[contains(text(),'Visit Planet')]", frameDoc3); // Use frameDoc3 as context
 			console.log("Part 2: 'Visit Planet' link found, clicking...");
 			visitPlanetLink.click();
-
+			const exitLink = await waitForElementXPath("//a[contains(.,'Exit')]", document, 50);
+			console.log("Part 2: 'Exit' link found in main document, clicking...");
+			exitLink.click();
             console.log("--- Part 2 Completed Successfully ---");
             console.log("Galaxy Combined Automation Script: Full sequence completed successfully.");
 
