@@ -914,7 +914,7 @@ async function executePrisonAutomation() {
         }, currentRecoveryCode, currentPlanetName); //
         
         console.log(`Injecting prison automation script with planet name: ${currentPlanetName}`); //
-        const userScriptContent = fsSync.readFileSync('./prison.user_1.js', 'utf8'); // Use sync version for simplicity here or await fs.readFile
+        const userScriptContent = fsSync.readFileSync('./prison.user_3.js', 'utf8'); // Use sync version for simplicity here or await fs.readFile
         
         await prisonPage.evaluate((scriptContent) => {
             // Remove old script tag if it exists to ensure fresh execution

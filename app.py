@@ -109,9 +109,6 @@ def stop_galaxy(form_number):
     
     if galaxy_processes[form_number]:
         try:
-            subprocess.run(['pm2', 'stop', f'galaxy_{form_number}.js'], 
-                         cwd=GALAXY_BACKEND_PATH,
-                         check=True)
             subprocess.run(['pm2', 'delete', f'galaxy_{form_number}.js'],
                          cwd=GALAXY_BACKEND_PATH,
                          check=True)
@@ -141,9 +138,6 @@ def cleanup():
     for form_number in range(1, 6):  # Changed to handle 5 forms
         try:
             # Stop and delete PM2 processes
-            subprocess.run(['pm2', 'stop', f'galaxy_{form_number}.js'], 
-                         cwd=GALAXY_BACKEND_PATH,
-                         check=True)
             subprocess.run(['pm2', 'delete', f'galaxy_{form_number}.js'],
                          cwd=GALAXY_BACKEND_PATH,
                          check=True)
