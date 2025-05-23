@@ -324,21 +324,21 @@
             const yesElement = await waitForElementXPath(targetXPath2, frameDoc1, 15000); // Use frameDoc1 as context
             console.log(`Part 2: Clicking 'Yes' paragraph inside frame ${frameIndex1}:`, yesElement);
             yesElement.click();
-            await delay(500); // Small delay after click
+            await delay(1000); // Small delay after click
 
             // 8. Click the image inside the second button (in the main document)
             console.log("Part 2: Waiting for the second button's image (main document)...");
             const secondButtonImg = await waitForElementXPath("//button[2]/img", document);
             console.log("Part 2: Second button image found, clicking...");
             secondButtonImg.click();
-            await delay(1200); // Wait for potential frame load/update
+            await delay(1500); // Wait for potential frame load/update
 
             // 9. Wait for the third iframe (index 2) and get its document
             const frameIndex2 = 1; // Third iframe (0-based index)
             console.log(`Part 2: Waiting for iframe index ${frameIndex2} and its document...`);
             const { frameDocument: frameDoc2 } = await waitForFrameAndGetDocument(frameIndex2); // Destructure to get frameDocument
             console.log(`Part 2: Switched context to iframe ${frameIndex2}'s document.`);
-            await delay(1200); // Allow frame content to settle
+            await delay(1500); // Allow frame content to settle
 
             // 10. Click planet name (or THE_BOT) inside the iframe
             console.log(`Part 2: Waiting for '${planetName || "THE_BOT"}' element inside iframe ${frameIndex2}...`);
